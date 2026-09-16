@@ -1,0 +1,168 @@
+@{
+    ViewData["Title"] = "Webmail";
+}
+
+<div class="row">
+    <!-- Sidebar de carpetas -->
+    <div class="col-md-3">
+        <div class="card mb-3">
+            <div class="card-body">
+                <button class="btn btn-primary w-100 mb-3" onclick="composeNew()">Redactar</button>
+                <ul class="list-group list-group-flush" id="folderList"></ul>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-body">
+                <h6 class="text-muted">Buscar</h6>
+                <div class="input-group">
+                    <input type="text" id="searchQ" class="form-control form-control-sm" placeholder="Asunto / remitente..." />
+                    <button class="btn btn-outline-secondary btn-sm" onclick="doSearch()">Ir</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Lista de mensajes / lectura -->
+    <div class="col-md-9">
+        <div id="mailArea">
+            <div class="card">
+                <div class="card-body text-center text-muted py-5" id="mailEmpty">Selecciona una carpeta.</div>
+                <div id="messageList" class="d-none card-body"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal redactar -->
+<div class="modal fade" id="composeModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title" id="composeTitle">Nuevo mensaje</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <input type="hidden" id="cInReplyTo" />
+                <div class="mb-2"><input type="text" id="cTo" class="form-control" placeholder="Para (separar con coma)" /></div>
+                <div class="mb-2"><input type="text" id="cCc" class="form-control" placeholder="CC (opcional)" /></div>
+                <div class="mb-2"><input type="text" id="cSubject" class="form-control" placeholder="Asunto" /></div>
+                <div class="mb-2"><textarea id="cBody" class="form-control" rows="8" placeholder="Escribe tu mensaje..."></textarea></div>
+                <input type="file" id="cAttach" class="form-control" multiple />
+            </div>
+            <div class="modal-footer">
+                <span id="composeError" class="text-danger me-auto d-none"></span>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                <button type="button" class="btn btn-primary" onclick="sendCompose()">Enviar</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+let csrfToken = ''; let folders = []; let currentFolder = null;
+
+async function getCsrf() {
+    const r = await fetch('/api/antiforgery/token');
+    const d = await r.json();
+    csrfToken = d.token;
+}
+
+async function api(url, options = {}) {
+    options.headers = Object.assign({ 'X-CSRF-TOKEN': csrfToken }, options.headers || {});
+    options.headers['Content-Type'] = options.headers['Content-Type'] || 'application/json';
+    const r = await fetch(url, options);
+    return r;
+}
+
+async function loadFolders() {
+    const r = await api('/api/mail/folders');
+    const list = await r.json();
+    folders = list;
+    const ul = $('#folderList').empty();
+    list.forEach(f => {
+        ul.append(`<li class="list-group-item d-flex justify-content-between align-items-center" style="cursor:pointer" onclick="openFolder(${f.id})">
+            <span>${f.name}</span><span class="badge bg-secondary">${f.unreadCount}</span></li>`);
+    });
+    if (list.length) openFolder(list.find(x => x.systemName === 0).id);
+}
+
+async function openFolder(folderId) {
+    currentFolder = folderId;
+    $('#messageList').removeClass('d-none');
+    const r = await api(`/api/mail/folder/${folderId}/messages?take=100`);
+    const msgs = await r.json();
+    $('#mailEmpty').addClass('d-none');
+    const out = $('#messageList').empty().html(
+        msgs.length ? msgs.map(m => messageRow(m)).join('') : '<div class="text-center text-muted py-4">Sin mensajes</div>');
+}
+
+function messageRow(m) {
+    return `<div class="d-flex justify-content-between border-bottom py-2 ${m.isRead ? '' : 'fw-bold'}" style="cursor:pointer" onclick="openMessage(${m.id})">
+        <span>${escapeHtml(m.senderAddress)}</span>
+        <span class="text-secondary">${escapeHtml(m.subject)}</span>
+        <span class="text-muted small">${new Date(m.dateUtc).toLocaleString()}</span>
+        ${m.hasAttachments ? '<span class="text-warning">📎</span>' : ''}
+    </div>`;
+}
+
+async function openMessage(id) {
+    const r = await api(`/api/mail/message/${id}`);
+    if (r.status === 404) { alert('Mensaje no encontrado'); return; }
+    const m = await r.json();
+    $('#messageList').removeClass('d-none').html(`
+        <h5>${escapeHtml(m.subject)}</h5>
+        <div class="text-muted small mb-2">De: ${escapeHtml(m.senderAddress)} · ${new Date(m.dateUtc).toLocaleString()}</div>
+        <div class="border-top pt-3" style="white-space:pre-wrap">${m.isHtml ? m.body : escapeHtml(m.body)}</div>
+        ${m.attachments.length ? '<div class="mt-3"><strong>Adjuntos:</strong> ' + m.attachments.map(a => escapeHtml(a.fileName) + ' (' + fmtSize(a.sizeBytes) + ')' + ' — sha256:' + a.sha256.slice(0,12)).join('<br/>') + '</div>' : ''}
+        <div class="mt-3">
+            <button class="btn btn-sm btn-outline-primary" onclick="composeReply('${m.senderAddress}','${escapeAttr(m.subject)}','${m.id}')">Responder</button>
+            <button class="btn btn-sm btn-outline-warning" onclick="setFlag(${m.id}, true)">Destacar</button>
+            <button class="btn btn-sm btn-outline-danger" onclick="moveMessage(${m.id}, trashFolderId())">Eliminar</button>
+        </div>`);
+    $('#mailEmpty').addClass('d-none');
+}
+
+function trashFolderId() { const f = folders.find(x => x.systemName === 3); return f ? f.id : folders[0].id; }
+
+async function setFlag(id, flag) { await api(`/api/mail/message/${id}/flag`, { method: 'POST', body: JSON.stringify(flag) }); openFolder(currentFolder); }
+async function moveMessage(id, dest) { await api(`/api/mail/message/${id}/move`, { method: 'POST', body: JSON.stringify(dest) }); openFolder(currentFolder); }
+
+function composeNew() { $('#cTo,#cCc,#cSubject,#cBody,#cInReplyTo').val(''); $('#cAttach').val(null); $('#composeTitle').text('Nuevo mensaje'); new bootstrap.Modal('#composeModal').show(); }
+function composeReply(addr, subject, id) {
+    $('#cTo').val(addr); $('#cCc').val('');
+    $('#cSubject').val((subject.startsWith('Re:') ? '' : 'Re: ') + subject);
+    $('#cBody,#cInReplyTo').val(id ? '' : '');
+    $('#composeTitle').text('Responder'); new bootstrap.Modal('#composeModal').show();
+}
+
+async function sendCompose() {
+    $('#composeError').addClass('d-none');
+    const body = { to: $('#cTo').val().split(',').map(s => s.trim()).filter(Boolean),
+        cc: $('#cCc').val().split(',').map(s => s.trim()).filter(Boolean),
+        subject: $('#cSubject').val(), body: $('#cBody').val() };
+    const r = await api('/api/mail/compose', { method: 'POST', body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) { $('#composeError').text(d.error || 'Error').removeClass('d-none'); return; }
+    bootstrap.Modal.getInstance('#composeModal').hide();
+    openFolder(currentFolder);
+}
+
+async function doSearch() {
+    const q = encodeURIComponent($('#searchQ').val().trim());
+    const r = await api(`/api/mail/search?subject=${q}`);
+    const results = await r.json();
+    $('#mailEmpty').addClass('d-none');
+    $('#messageList').removeClass('d-none').html(results.length
+        ? results.map(m => messageRow(m)).join('')
+        : '<div class="text-center text-muted py-4">Sin resultados</div>');
+}
+
+function escapeHtml(s) { return $('<div>').text(s ?? '').html(); }
+function escapeAttr(s) { return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+function fmtSize(b) { return b > 1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(1)+' KB'; }
+
+$(async function () {
+    await getCsrf();
+    await loadFolders();
+});
+</script>
+}

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-AtlasMail.Worker-2b7b3a13-fd04-442d-b923-4e2cf89a318c</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AtlasMail.Infrastructure\AtlasMail.Infrastructure.csproj" />
+    <ProjectReference Include="..\AtlasMail.Application\AtlasMail.Application.csproj" />
+    <ProjectReference Include="..\AtlasMail.Protocols\AtlasMail.Protocols.csproj" />
+  </ItemGroup>
+</Project>

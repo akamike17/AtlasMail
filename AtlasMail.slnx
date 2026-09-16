@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AtlasMail.Application/AtlasMail.Application.csproj" />
+    <Project Path="src/AtlasMail.Domain/AtlasMail.Domain.csproj" />
+    <Project Path="src/AtlasMail.Infrastructure/AtlasMail.Infrastructure.csproj" />
+    <Project Path="src/AtlasMail.Protocols/AtlasMail.Protocols.csproj" />
+    <Project Path="src/AtlasMail.Security/AtlasMail.Security.csproj" />
+    <Project Path="src/AtlasMail.Web/AtlasMail.Web.csproj" />
+    <Project Path="src/AtlasMail.Worker/AtlasMail.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AtlasMail.IntegrationTests/AtlasMail.IntegrationTests.csproj" />
+    <Project Path="tests/AtlasMail.UnitTests/AtlasMail.UnitTests.csproj" />
+  </Folder>
+</Solution>

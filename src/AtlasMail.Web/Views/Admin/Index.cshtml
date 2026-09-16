@@ -1,0 +1,136 @@
+@{
+    ViewData["Title"] = "Administración";
+}
+
+<div class="row mb-3">
+    <div class="col">
+        <h3>Admin Center</h3>
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-outline-secondary" onclick="loadTab('dashboard')">Dashboard</button>
+        <button class="btn btn-outline-secondary" onclick="loadTab('domains')">Dominios</button>
+        <button class="btn btn-outline-secondary" onclick="loadTab('mailboxes')">Buzones</button>
+        <button class="btn btn-outline-secondary" onclick="loadTab('aliases')">Alias</button>
+        <button class="btn btn-outline-secondary" onclick="loadTab('queue')">Cola</button>
+        <button class="btn btn-outline-secondary" onclick="loadTab('trace')">Trace</button>
+        <button class="btn btn-outline-secondary" onclick="loadTab('audit')">Auditoría</button>
+        <button class="btn btn-outline-secondary" onclick="doBackup()">Backup</button>
+    </div>
+</div>
+
+<div id="adminPane"><div class="text-muted">Cargando…</div></div>
+
+@section Scripts {
+<script>
+let csrfToken = '';
+
+async function getCsrf() {
+    const r = await fetch('/api/antiforgery/token');
+    csrfToken = (await r.json()).token;
+}
+async function api(url, options = {}) {
+    options.headers = Object.assign({ 'X-CSRF-TOKEN': csrfToken }, options.headers || {});
+    options.headers['Content-Type'] = options.headers['Content-Type'] || 'application/json';
+    return await fetch(url, options);
+}
+
+async function loadTab(tab) {
+    const pane = $('#adminPane');
+    pane.html('<div class="text-muted">Cargando…</div>');
+    if (tab === 'dashboard') {
+        const d = await (await api('/api/admin/dashboard')).json();
+        pane.html(`<div class="row g-3">
+            ${statCard('Dominios', d.domainCount)}${statCard('Usuarios', d.userCount)}${statCard('Buzones', d.mailboxCount)}
+            ${statCard('Mensajes', d.totalMessages)}${statCard('Storage', fmtBytes(d.storageBytes))}${statCard('Auditoría', d.auditCount)}
+            ${statCard('Spam', d.spamCount)}${statCard('Cuarentena', d.quarantineCount)}</div>
+            <div class="mt-3"><h6>Cola</h6><p>Pending: ${d.queue.pending} · Processing: ${d.queue.processing} · Deferred: ${d.queue.deferred} · Failed: ${d.queue.failed}</p></div>`);
+    }
+    else if (tab === 'domains') {
+        const list = await (await api('/api/admin/domains')).json();
+        pane.html(`<button class="btn btn-sm btn-primary mb-2" onclick="promptCreateDomain()">Nuevo dominio</button>
+            <table class="table table-sm"><thead><tr><th>ID</th><th>Dominio</th><th>Estado</th><th>Cuota</th><th>Buzones</th></tr></thead>
+            <tbody>${list.map(d => `<tr><td>${d.id}</td><td>${d.name}</td><td>${d.enabled ? 'Activo' : 'Deshabilitado'}</td><td>${fmtBytes(d.maxMailboxQuotaBytes)}</td><td>${d.mailboxCount}</td></tr>`).join('')}</tbody></table>`);
+    }
+    else if (tab === 'mailboxes') {
+        const list = await (await api('/api/admin/mailboxes')).json();
+        pane.html(`<button class="btn btn-sm btn-primary mb-2" onclick="promptCreateMailbox()">Nuevo buzón</button>
+            <table class="table table-sm"><thead><tr><th>Buzón</th><th>Estado</th><th>Uso</th></tr></thead>
+            <tbody>${list.map(m => `<tr><td>${escapeHtml(m.emailAddress)}</td><td>${m.status}</td><td>${fmtBytes(m.usedBytes)} / ${fmtBytes(m.quotaBytes)}</td></tr>`).join('')}</tbody></table>`);
+    }
+    else if (tab === 'aliases') {
+        const list = await (await api('/api/admin/aliases')).json();
+        pane.html(`<button class="btn btn-sm btn-primary mb-2" onclick="promptCreateAlias()">Nuevo alias</button>
+            <table class="table table-sm"><thead><tr><th>Alias</th><th>Destino</th><th>Estado</th></tr></thead>
+            <tbody>${list.map(a => `<tr><td>${escapeHtml(a.aliasedAddress)}</td><td>${escapeHtml(a.target || '—')}</td><td>${a.enabled ? 'Activo' : 'No'}</td></tr>`).join('')}</tbody></table>`);
+    }
+    else if (tab === 'queue') {
+        const list = await (await api('/api/admin/queue?take=100')).json();
+        pane.html(`<table class="table table-sm"><thead><tr><th>#</th><th>De</th><th>Para</th><th>Estado</th><th>Intentos</th><th>Próx. intento</th><th>Error</th></tr></thead>
+            <tbody>${list.map(q => `<tr><td>${q.id}</td><td>${escapeHtml(q.envelopeFrom)}</td><td>${escapeHtml(q.envelopeTo)}</td><td>${q.state}</td><td>${q.attempts}/${q.maxAttempts}</td><td>${q.nextAttemptAtUtc ? new Date(q.nextAttemptAtUtc).toLocaleString() : '—'}</td><td class="text-danger">${escapeHtml(q.lastError || '')}</td></tr>`).join('')}</tbody></table>`);
+    }
+    else if (tab === 'trace') {
+        const list = await (await api('/api/admin/trace?take=100')).json();
+        pane.html(`<table class="table table-sm"><thead><tr><th>#</th><th>MessageId</th><th>De</th><th>Para</th><th>Estado</th><th>Intentos</th><th>Últ. error</th></tr></thead>
+            <tbody>${list.map(t => `<tr><td>${t.id}</td><td class="text-muted small">${escapeHtml(t.messageIdHeader || '')}</td><td>${escapeHtml(t.envelopeFrom)}</td><td>${escapeHtml(t.envelopeTo)}</td><td>${t.state}</td><td>${t.attempts}</td><td class="text-danger">${escapeHtml(t.lastError || '')}</td></tr>`).join('')}</tbody></table>`);
+    }
+    else if (tab === 'audit') {
+        const list = await (await api('/api/admin/audit?take=200')).json();
+        pane.html(`<table class="table table-sm"><thead><tr><th>Fecha</th><th>Acción</th><th>Actor</th><th>IP</th><th>Objetivo</th><th>Resultado</th></tr></thead>
+            <tbody>${list.map(a => `<tr><td>${new Date(a.timestampUtc).toLocaleString()}</td><td>${escapeHtml(a.action)}</td><td>${escapeHtml(a.actor || '')}</td><td>${escapeHtml(a.ipAddress || '')}</td><td>${escapeHtml(a.target || '')}</td><td>${escapeHtml(a.result || '')}</td></tr>`).join('')}</tbody></table>`);
+    }
+}
+
+function statCard(label, value) {
+    return `<div class="col"><div class="card"><div class="card-body py-2"><div class="text-muted small">${label}</div><div class="h5 mb-0">${value}</div></div></div></div>`;
+}
+function fmtBytes(b) { return b > 1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(1)+' KB'; }
+function escapeHtml(s) { return $('<div>').text(s ?? '').html(); }
+
+async function promptCreateDomain() {
+    const name = prompt('Nombre del dominio (p.ej. empresa.com):');
+    if (!name) return;
+    const r = await api('/api/admin/domain', { method: 'POST', body: JSON.stringify({ name, maxMailboxQuotaBytes: 1073741824, maxRecipientsPerMessage: 100, maxMessageSizeBytes: 52428800, plusAddressingEnabled: true, catchAllEnabled: false }) });
+    const d = await r.json();
+    alert(r.ok ? ('Dominio creado id=' + d.id) : ('Error: ' + (d.error || 'desconocido')));
+    if (r.ok) loadTab('domains');
+}
+
+async function promptCreateMailbox() {
+    const domains = await (await api('/api/admin/domains')).json();
+    if (!domains.length) { alert('Primero crea un dominio.'); return; }
+    const domain = domains[0];
+    const local = prompt('LocalPart (p.ej. alice):');
+    if (!local) return;
+    const display = prompt('Nombre visible:', local) || local;
+    const pass = prompt('Contraseña (mín 8, 1 mayús, 1 dígito, 1 especial):', 'Atl4smail1!');
+    if (!pass) return;
+    const r = await api('/api/admin/mailbox', { method: 'POST', body: JSON.stringify({ domainId: domain.id, localPart: local, displayName: display, password: pass }) });
+    const d = await r.json();
+    alert(r.ok ? ('Buzón creado id=' + d.id) : ('Error: ' + (d.error || 'desconocido')));
+    if (r.ok) loadTab('mailboxes');
+}
+
+async function promptCreateAlias() {
+    const domains = await (await api('/api/admin/domains')).json();
+    if (!domains.length) { alert('Primero crea un dominio.'); return; }
+    const domain = domains[0];
+    const mailboxes = await (await api('/api/admin/mailboxes?domainId=' + domain.id)).json();
+    if (!mailboxes.length) { alert('Primero crea un buzón.'); return; }
+    const local = prompt('LocalPart del alias (p.ej. ventas):');
+    if (!local) return;
+    const target = mailboxes[0];
+    const r = await api('/api/admin/alias', { method: 'POST', body: JSON.stringify({ domainId: domain.id, localPart: local, targetMailboxId: target.id }) });
+    const d = await r.json();
+    alert(r.ok ? ('Alias creado id=' + d.id) : ('Error: ' + (d.error || 'desconocido')));
+    if (r.ok) loadTab('aliases');
+}
+
+async function doBackup() {
+    const r = await api('/api/admin/backup', { method: 'POST' });
+    const d = await r.json();
+    alert(r.ok ? ('Backup creado: ' + d.backupId + ' · ' + fmtBytes(d.messageBytes)) : ('Error: ' + (d.error || 'desconocido')));
+}
+
+$(async function () { await getCsrf(); loadTab('dashboard'); });
+</script>
+}

@@ -1,0 +1,27 @@
+# Build
+bin/
+obj/
+*.user
+
+# .NET
+.vs/
+*.suo
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Almacenamiento local de mensajes (nunca commitear contenido real)
+**/mailstore/
+**/backups/
+
+# Entornos / secretos
+appsettings.Development.*
+appsettings.Production.*
+
+# Tests temp
+TestResults/
+*.trx
