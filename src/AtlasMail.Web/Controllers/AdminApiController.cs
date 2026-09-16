@@ -1,4 +1,5 @@
 using AtlasMail.Application;
+using AtlasMail.Application.Abstractions;
 using AtlasMail.Application.Dtos;
 using AtlasMail.Domain.Enums;
 using AtlasMail.Web.Services;
@@ -23,12 +24,13 @@ public class AdminApiController : ControllerBase
     private readonly IMessageTraceService _trace;
     private readonly IAuditService _audit;
     private readonly IBackupService _backup;
+    private readonly IDomainMailAuthService _mailAuth;
     private readonly ICurrentUser _current;
 
     public AdminApiController(IAdminService admin, IAdminDashboardService dashboard, IOutboundQueueService queue,
-        IMessageTraceService trace, IAuditService audit, IBackupService backup, ICurrentUser current)
+        IMessageTraceService trace, IAuditService audit, IBackupService backup, IDomainMailAuthService mailAuth, ICurrentUser current)
     {
-        _admin = admin; _dashboard = dashboard; _queue = queue; _trace = trace; _audit = audit; _backup = backup; _current = current;
+        _admin = admin; _dashboard = dashboard; _queue = queue; _trace = trace; _audit = audit; _backup = backup; _mailAuth = mailAuth; _current = current;
     }
 
     [HttpGet("dashboard")]
@@ -124,5 +126,32 @@ public class AdminApiController : ControllerBase
     {
         try { return Ok(await _backup.RestoreAsync(id, _current.Username!)); }
         catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    // ---- FASE 4: autenticación de correo por dominio (spec §17-19) ----
+
+    [HttpGet("domain/{id:long}/auth")]
+    [Authorize(Roles = "SuperAdmin")]
+    public async Task<IActionResult> DomainAuth(long id)
+    {
+        try { return Ok(await _mailAuth.GetStatusAsync(id)); }
+        catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
+    }
+
+    [HttpPost("domain/{id:long}/auth/dkim/enable")]
+    [Authorize(Roles = "SuperAdmin")]
+    public async Task<IActionResult> EnableDkim(long id)
+    {
+        try { return Ok(await _mailAuth.EnableDkimAsync(id)); }
+        catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
+    }
+
+    [HttpPost("domain/{id:long}/auth/dmarc")]
+    [Authorize(Roles = "SuperAdmin")]
+    public async Task<IActionResult> SetDmarc(long id, [FromBody] string policy)
+    {
+        try { return Ok(await _mailAuth.SetDmarcPolicyAsync(id, policy)); }
+        catch (ArgumentException ex) { return BadRequest(new { error = ex.Message }); }
+        catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
     }
 }

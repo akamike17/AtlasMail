@@ -2,6 +2,7 @@ using AtlasMail.Application;
 using AtlasMail.Application.Abstractions;
 using AtlasMail.Application.Services;
 using AtlasMail.Infrastructure.Dns;
+using AtlasMail.Infrastructure.EmailAuth;
 using AtlasMail.Infrastructure.Imap;
 using AtlasMail.Infrastructure.Persistence;
 using AtlasMail.Infrastructure.Storage;
@@ -72,6 +73,20 @@ public static class InfrastructureRegistrar
 
         // FASE 3: backend IMAP sobre MySQL/metadata + IMessageStore (protocolo desacoplado)
         services.AddScoped<IMailboxBackend, MySqlMailboxBackend>();
+
+        // FASE 4: autenticación de correo (SPF/DKIM/DMARC) en recepción
+        services.AddSingleton<IDnsRecordResolver>(sp =>
+        {
+            var logger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("AtlasMail.Infrastructure.Dns.DnsRecordResolver");
+            return new DnsRecordResolver(timeout: TimeSpan.FromSeconds(5), logger: logger);
+        });
+        services.AddScoped<IEmailAuthenticationService>(sp =>
+            new EmailAuthenticationService(
+                sp.GetRequiredService<IDnsRecordResolver>(),
+                dmarcEnforce: config.GetValue("Delivery:DmarcEnforce", true),
+                logger: sp.GetRequiredService<ILoggerFactory>().CreateLogger<EmailAuthenticationService>()));
+        services.AddScoped<IDomainMailAuthService, DomainMailAuthService>();
+        services.AddScoped<DkimOutboundSigner>();
         services.AddScoped<IBackupService>(sp => new BackupService(
             sp.GetRequiredService<AtlasMailDbContext>(),
             sp.GetRequiredService<IMessageStore>(),

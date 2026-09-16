@@ -24,15 +24,22 @@ public class InboundDeliveryService : IInboundDeliveryService
         private readonly IAttachmentScanner _scanner;
         private readonly IAddressResolutionService _resolver;
         private readonly IAuditService _audit;
+        private readonly IEmailAuthenticationService? _emailAuth;
         private readonly ILogger<InboundDeliveryService> _logger;
 
         public InboundDeliveryService(IApplicationDbContext db, IMessageStore store,
             IRuleEngine rules, IAttachmentScanner scanner, IAddressResolutionService resolver,
-            IAuditService audit, ILogger<InboundDeliveryService> logger)
+            IAuditService audit, IEmailAuthenticationService? emailAuth, ILogger<InboundDeliveryService> logger)
         {
             _db = db; _store = store; _rules = rules;
-            _scanner = scanner; _resolver = resolver; _audit = audit; _logger = logger;
+            _scanner = scanner; _resolver = resolver; _audit = audit; _emailAuth = emailAuth; _logger = logger;
         }
+
+        // Constructor legacy para tests que no dependen de auth de correo (FASE 4)
+        public InboundDeliveryService(IApplicationDbContext db, IMessageStore store,
+            IRuleEngine rules, IAttachmentScanner scanner, IAddressResolutionService resolver,
+            IAuditService audit, ILogger<InboundDeliveryService> logger)
+            : this(db, store, rules, scanner, resolver, audit, emailAuth: null, logger) { }
 
     public async Task<InboundResult> IngestAsync(string envelopeFrom, string envelopeTo, byte[] rawMime,
         string? helo, string? clientIp, bool authenticated, string actor, CancellationToken ct = default)
@@ -65,25 +72,54 @@ public class InboundDeliveryService : IInboundDeliveryService
         // Spam score (simple: señales locales; no API comercial)
         var spam = ComputeSpam(rawMime, parsed, helo, authenticated);
 
+        // FASE 4: autenticación de correo (SPF/DKIM/DMARC) en recepción
+        double authScore = 0.0;
+        string authSummary = "auth=none";
+        bool dmarcReject = false, dmarcQuarantine = false;
+        if (!authenticated && _emailAuth != null)
+        {
+            string fromDomain = FromHeaderDomain(parsed.SenderAddress) ?? EnvelopeDomain(envelopeFrom);
+            if (!string.IsNullOrEmpty(fromDomain))
+            {
+                try
+                {
+                    var auth = await _emailAuth.AuthenticateAsync(fromDomain, envelopeFrom, clientIp, rawMime, ct);
+                    authSummary = string.Join(",", auth.AuthResults);
+                    if (auth.SpfResult.Equals("Fail", StringComparison.OrdinalIgnoreCase)) authScore += 2.5;
+                    else if (auth.SpfResult.Equals("SoftFail", StringComparison.OrdinalIgnoreCase)) authScore += 1.0;
+                    if (auth.DkimResult.Equals("Fail", StringComparison.OrdinalIgnoreCase)) authScore += 2.0;
+                    if (!auth.DmarcAligned && auth.DmarcResult.Equals("Fail", StringComparison.OrdinalIgnoreCase)) authScore += 2.0;
+                    dmarcReject = auth.ShouldReject;
+                    dmarcQuarantine = auth.ShouldQuarantine;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Fallo auth de correo para {From}: {Msg}", envelopeFrom, ex.Message);
+                }
+            }
+        }
+
         // Objetivo de carpeta (reglas)
         var (folderOverride, moveToSpam) = await _rules.EvaluateAsync(envelopeFrom, envelopeTo, parsed.Subject, ct);
         var targetFolder = moveToSpam ? SystemFolder.Spam : SystemFolder.Inbox;
         if (!moveToSpam && folderOverride is not null && folderOverride.Equals("Spam", StringComparison.OrdinalIgnoreCase))
             targetFolder = SystemFolder.Spam;
 
-        SpamDecision decision = !authenticated && spam.Score >= 6 ? SpamDecision.Spam : SpamDecision.Allow;
+        SpamDecision decision = !authenticated && spam.Score + authScore >= 6 ? SpamDecision.Spam : SpamDecision.Allow;
+        if (dmarcReject && !authenticated) decision = SpamDecision.Reject;
+        else if (dmarcQuarantine && !authenticated) decision = SpamDecision.Quarantine;
         if (overQuota) decision = SpamDecision.Quarantine;
 
         // STORE metadata
         if (!resolved.MailboxId.HasValue)
             return await Reject(envelopeFrom, envelopeTo, "recipient_not_found", actor, clientIp, ct);
-        await StoreMetadataAsync(envelopeFrom, envelopeTo, parsed, storeKey, size, decision, spam.Score,
+        await StoreMetadataAsync(envelopeFrom, envelopeTo, parsed, storeKey, size, decision, spam.Score + authScore,
             resolved.MailboxId.Value, targetFolder, ct);
 
         if (decision == SpamDecision.Spam) targetFolder = SystemFolder.Spam;
 
         await _audit.RecordAsync("Smtp.Ingest", actor, null, clientIp, "message", envelopeTo, "OK",
-            $"decision={decision} score={spam.Score:F1} store={storeKey}", ct);
+            $"decision={decision} score={spam.Score + authScore:F1} auth=[{authSummary}] store={storeKey}", ct);
         _logger.LogInformation("Ingesta SMTP OK {To} de {From} decision={Decision}", envelopeTo, envelopeFrom, decision);
         return decision == SpamDecision.Reject ? InboundResult.Rejected
             : decision == SpamDecision.Quarantine ? InboundResult.Quarantined
@@ -178,5 +214,21 @@ public class InboundDeliveryService : IInboundDeliveryService
             Sha256 = sha,
             ScanStatus = AttachmentScanStatus.Unknown
         };
+    }
+
+    private static string? FromHeaderDomain(string? senderAddress)
+    {
+        if (string.IsNullOrWhiteSpace(senderAddress)) return null;
+        int at = senderAddress.IndexOf('@');
+        return at >= 0 ? senderAddress[(at + 1)..] : null;
+    }
+
+    private static string? EnvelopeDomain(string envelopeFrom)
+    {
+        var e = envelopeFrom.Trim();
+        if (e.StartsWith("<")) e = e.Trim('<', '>');
+        if (e.StartsWith("MAIL FROM:")) e = e["MAIL FROM:".Length..].Trim().Trim('<', '>');
+        int at = e.IndexOf('@');
+        return at >= 0 ? e[(at + 1)..] : null;
     }
 }

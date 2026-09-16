@@ -3,6 +3,7 @@ using AtlasMail.Application.Abstractions;
 using AtlasMail.Application.Services;
 using AtlasMail.Domain.Enums;
 using AtlasMail.Domain.ValueObjects;
+using AtlasMail.Infrastructure.EmailAuth;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -74,6 +75,14 @@ public class DeliveryWorker : BackgroundService
             _logger.LogWarning("Cola {Id}: no se pudo leer store, marcando failed", claim.QueueItemId);
             await queue.FailAsync(claim.QueueItemId, "store_unreadable: " + ex.Message, null, deadLetter: true, ct);
             return true;
+        }
+
+        // FASE 4: firmar DKIM en salida si el dominio del remitente lo tiene habilitado (§18)
+        var dkimSigner = scope.ServiceProvider.GetService<DkimOutboundSigner>();
+        if (dkimSigner != null)
+        {
+            try { raw = await dkimSigner.SignIfEnabledAsync(claim.EnvelopeFrom, raw, ct); }
+            catch (Exception ex) { _logger.LogDebug("DKIM outbound skip para {Id}: {Msg}", claim.QueueItemId, ex.Message); }
         }
 
         // ¿Entrega local o externa?

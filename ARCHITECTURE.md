@@ -4,6 +4,7 @@ Servidor empresarial de correo y colaboración self-hosted. Multi-dominio.
 **Ciclo 1**: vertical slice funcional (ADMIN → dominio → buzones → webmail → SMTP → cola → trace → backup → audit).
 **FASE 2**: SMTP robusto + entrega externa (MX/DNS real, STARTTLS, AUTH, bounces seguros, rate limits, observabilidad).
 **FASE 3**: IMAP4rev1 y clientes externos (servidor IMAP desacoplado del almacenamiento, migración `ImapDeletedFlag`).
+**FASE 4**: autenticación de correo SPF/DKIM/DMARC (recepción + firma DKIM en salida + admin DNS).
 
 ## Stack
 - ASP.NET Core 8 (MVC + Razor + JS `fetch()`), Bootstrap local (sin CDN).
@@ -37,6 +38,22 @@ Web → Infrastructure+Application+Protocols+Security+Worker.
 - `Message.IsDeleted` para el flag \Deleted (migración `ImapDeletedFlag`).
 - Compatibilidad con Thunderbird/Outlook/Apple Mail pendiente de prueba real (§44).
 - Hosted service `ImapHostedService` inicia el listener (puerto 143 o `Imap:Port`).
+
+## Autenticación de correo (spec §17-19) — FASE 4
+- `AtlasMail.Security.EmailAuth` (módulos puros y testeables):
+  - `SpfEvaluator` (RFC 7208): mecanismos ip4/ip6/a/mx/include/exists/all, qualifiers, redirect, macros.
+  - `Dkim` (RFC 6376): firma/verificación RSA-SHA256, canonicalización relaxed/simple, generación de claves.
+  - `DmarcEvaluator` (RFC 7489): alineación SL/DKIM relaxed/strict + registrable-domain.
+- Infrastructure:
+  - `DnsRecordResolver` (consultas TXT/A/AAAA para SPF/DKIM/DMARC).
+  - `EmailAuthenticationService`: orquesta SPF+DKIM+DMARC en recepción y produce `EmailAuthReport`
+    (resultados auditables + `ShouldReject`/`ShouldQuarantine`).
+  - `DomainMailAuthService`: por dominio genera/muestra registros SPF/DKIM/DMARC a publicar.
+  - `DkimOutboundSigner`: firma MIME en salida si el dominio del remitente tiene DKIM habilitado.
+- Integración: la ingesta (`InboundDeliveryService`) suma señales de auth al spam score y aplica
+  política DMARC (`Delivery:DmarcEnforce`). El worker firma DKIM antes de entregar externamente.
+- Endpoints admin (SuperAdmin): `GET domain/{id}/auth`, `POST domain/{id}/auth/dkim/enable`,
+  `POST domain/{id}/auth/dmarc`.
 
 ## Persistencia y almacenamiento de mensajes (spec §1)
 - **No** se guarda MIME completo en MySQL.

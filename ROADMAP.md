@@ -1,8 +1,9 @@
 # AtlasMail — ROADMAP
 
 Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 1.md),
-**FASE 2 completada** (SMTP robusto + entrega externa) y
-**FASE 3 completada** (IMAP y clientes externos).
+**FASE 2 completada** (SMTP robusto + entrega externa),
+**FASE 3 completada** (IMAP y clientes externos) y
+**FASE 4 completada** (SPF/DKIM/DMARC).
 
 ## CICLO 1 — COMPLETADO ✅
 - Arquitectura modular (`src/*` + `tests/*`, .NET 8, MySQL/Pomelo).
@@ -45,9 +46,26 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
   la compatibilidad se probó contra nuestra implementación real (cliente IMAP real por socket),
   no contra esos clientes todavía.
 
-## FASE 4 — Autenticación de correo (SPF/DKIM/DMARC)
-- Verificación SPF en recepción; firma/verificación DKIM; evaluación DMARC con alignment.
-- Administración: mostrar registros DNS a publicar por dominio.
+## FASE 4 — Autenticación de correo (SPF/DKIM/DMARC) ✅
+- **SPF (RFC 7208)**: evaluador puro (`AtlasMail.Security.EmailAuth.SpfEvaluator`) con mecanismos
+  ip4/ip6/a/mx/include/exists/all, qualifiers (+/-/~/?), `redirect`, macros %{d %{i} %{s} %{l} %{o} %{h}
+  y límite de 10 consultas DNS. Resultados Pass/Fail/SoftFail/Neutral/None/TempError/PermError.
+  Verificación en recepción (resolver DNS real) integrada al scoring y a la política; no se rechaza
+  ciegamente SoftFail (§17).
+- **DKIM (RFC 6376)**: firma en salida (RSA-SHA256, canonicalización relaxed/simple) en el worker
+  si el dominio tiene la clave; verificación en recepción (extrae firmas, obtiene clave pública del
+  selector `_atlasmail._domainkey` por DNS, verifica firma/body hash). Generación de clave y registro
+  DNS administrable (§18). La clave privada jamás se expone por API.
+- **DMARC (RFC 7489)**: evaluación con alineación SPF/DKIM (relaxed/strict, con registrable-domain
+  para ccTLD), política configurable (none/quarantine/reject aplicadas según `Delivery:DmarcEnforce`).
+  Resultados auditables en el audit del mensaje (`auth=[spf=.. dkim=.. dmarc=..]`).
+- **Administración (§17-19)**: endpoints `/api/admin/domain/{id}/auth`, `auth/dkim/enable`,
+  `auth/dmarc` — muestran los registros DNS a publicar (SPF, `selector._domainkey` TXT, `_dmarc` TXT).
+- Tests: **unit 94/94** (+21: SPF parseo/resultados, DKIM roundtrip firmar/verificar/body-tampered,
+  DMARC alignment/tld, DomainMailAuthService DKIM/DMARC, DkimOutboundSigner) e **integration 17/17**
+  (+2: admin auth genera DKIM+DMARC, política inválida rechazada).
+- Honestidad: la verificación SPF/DKIM/DMARC en recepción contra DNS público depende de que el dominio
+  exista; en la suite se valida el flujo sin red (SPF None / DKIM none / DMARC NoRecord).
 
 ## FASE 5 — Antispam / quarantine / antimalware
 - Scoring ampliado (reputación, historial, MDMF); cuarentena administrable y liberación auditada.

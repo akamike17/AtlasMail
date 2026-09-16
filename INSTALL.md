@@ -66,7 +66,23 @@ export Delivery__DnsProbeDomain='gmail.com'      # dominio que usa el probe de D
 Los fallos permanentes (5xx) generan un DSN/bounce al remitente **solo** si es un buzón local válido
 (anti-backscatter). La resolución DNS real no requiere configuración (usa los servidores del sistema).
 
-## 6. IMAP (FASE 3)
+## 6. Autenticación de correo (FASE 4)
+SPF/DKIM/DMARC en recepción y firma DKIM en salida:
+
+```bash
+export Delivery__DmarcEnforce=true   # false audit-only: DMARC fail se suma al score pero no rechaza/cuarentena
+```
+
+Administración por dominio (SuperAdmin): el Admin Center ya expone
+`GET /api/admin/domain/{id}/auth` (registros DNS a publicar), `POST .../auth/dkim/enable` (genera clave
+DKIM y el registro `atlasmail._domainkey.<dominio>` TXT) y `POST .../auth/dmarc` (`"none"|"quarantine"|"reject"`).
+
+Registros a publicar en tu DNS:
+- **SPF**: `v=spf1 mx <tus-IPs> ~all` en el TXT del dominio.
+- **DKIM**: `v=DKIM1; k=rsa; p=<clave-pública>` en `atlasmail._domainkey.<dominio>` TXT.
+- **DMARC**: `v=DMARC1; p=<policy>; adkim=r; aspf=r; fo=1` en `_dmarc.<dominio>` TXT.
+
+## 7. IMAP (FASE 3)
 Servidor IMAP4rev1 (login, listar/select carpetas, listar y obtener mensajes, flags, mover, eliminar):
 
 ```bash
@@ -79,7 +95,7 @@ export Imap__MaxMessageBytes=52428800
 Clientes: host `mail.midominio.com`, puerto 143, IMAP normal (sin autenticación SSL aún; se puede añadir
 STARTTLS/IMAPS en una fase posterior). Autenticación con el **password del buzón** (mismo que SMTP AUTH).
 
-## 7. Ejecutar
+## 8. Ejecutar
 ```bash
 # Web (admin + webmail) — arranca también SMTP / IMAP (si enabled) y el worker de cola
 dotnet run --project src/AtlasMail.Web -c Release
@@ -91,7 +107,7 @@ dotnet run --project src/AtlasMail.Worker -c Release
 La Web levanta internamente el DeliveryWorker (cola). Para producción puede ejecutarse el Worker
 como proceso aparte apuntando a la misma DB/message-store.
 
-## 8. Verificación de humo
+## 9. Verificación de humo
 - `GET /health` → 200.
 - `GET /Account/Login` → 200 HTML.
 - Login del admin → redirect a `/Admin` (dashboard).

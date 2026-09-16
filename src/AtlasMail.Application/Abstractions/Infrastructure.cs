@@ -126,3 +126,55 @@ public enum ExternalOutcomeKind
     PolicyDenied,       // dominio no autorizado a enviar externo
     NoMxEntry
 }
+
+/// <summary>
+/// Consultas DNS TXT/record para autenticación de correo (FASE 4: SPF/DKIM/DMARC).
+/// Abstraída para poder testear la lógica con un resolver falso sin red real.
+/// </summary>
+public interface IDnsRecordResolver
+{
+    /// <summary>Devuelve los registros TXT de un nombre (cada string es un fragmento TXT completo).</summary>
+    Task<IReadOnlyList<string>> GetTxtAsync(string name, CancellationToken ct = default);
+    /// <summary>Resuelve un nombre a IPs (para mecanismos SPF a/mx).</summary>
+    Task<IReadOnlyList<string>> GetAddressesAsync(string hostname, CancellationToken ct = default);
+}
+
+/// <summary>
+/// Autenticación de correo en recepción (FASE 4): evalúa SPF, DKIM y DMARC de un mensaje
+/// y devuelve el reporte para integrarlo al scoring y a la política (spec §17-19).
+/// Implementación en Infrastructure (usa la capa Security y el resolver DNS).
+/// </summary>
+public interface IEmailAuthenticationService
+{
+    Task<EmailAuthReport> AuthenticateAsync(
+        string fromHeaderDomain, string envelopeFrom, string? clientIp,
+        byte[] rawMime, CancellationToken ct = default);
+}
+
+/// <summary>Reporte unificado de autenticación de correo del mensaje.</summary>
+public sealed record EmailAuthReport(
+    string SpfResult, string? SpfRule,
+    string DkimResult, string? DkimSelector, string? DkimDomain,
+    string DmarcResult, string DmarcPolicy, bool DmarcAligned,
+    bool ShouldReject, bool ShouldQuarantine,
+    IReadOnlyList<string> AuthResults);
+
+/// <summary>
+/// Diagnóstico y gestión de autenticación de correo por dominio (spec §17-19):
+/// genera/muestra el registro SPF, genera/administra el selector y claves DKIM, y muestra
+/// el registro DMARC a publicar. Implementación en Infrastructure (Security + DNS).
+/// </summary>
+public interface IDomainMailAuthService
+{
+    Task<DomainMailAuthStatus> GetStatusAsync(long domainId, CancellationToken ct = default);
+    Task<DomainMailAuthStatus> EnableDkimAsync(long domainId, CancellationToken ct = default);
+    Task<DomainMailAuthStatus> SetDmarcPolicyAsync(long domainId, string policy, CancellationToken ct = default);
+}
+
+/// <summary>Estado DNS de autenticación de un dominio y los registros a publicar.</summary>
+public sealed record DomainMailAuthStatus(
+    long DomainId, string DomainName,
+    bool SpfEnabled, string? SpfRecordToPublish,
+    bool DkimEnabled, string? DkimSelector, string? DkimPublicKeyRecord,
+    string? DmarcPolicy, string? DmarcRecordToPublish,
+    string? DkimPrivateKeyHint); // nunca exponer la clave privada completa

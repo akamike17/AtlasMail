@@ -96,6 +96,33 @@ Desacoplado del almacenamiento vía `IMailboxBackend` (`MySqlMailboxBackend` sob
 - **Compatible con Thunderbird/Outlook/Apple Mail: NO PROVEN aún (§44)** — se probó contra un cliente
   IMAP real por socket (nuestra implementación), no contra esos clientes. Prueba real pendiente.
 
+## Autenticación de correo (spec §17-19) — FASE 4
+Evaluación en recepción y firma en salida. Resultados auditables vía metadata del mensaje (`auth=[...]`).
+
+### SPF (RFC 7208)
+- `SpfEvaluator`: mecanismos ip4/ip6/a/mx/include/exists/all; qualifiers `+ - ~ ?`; `redirect`;
+  macros `%{d %{i} %{s} %{l} %{o} %{h}`. Límite 10 consultas DNS.
+- Resultados: Pass / Fail / SoftFail / Neutral / None / TempError / PermError.
+- Verificación en recepción contra la IP del remitente; se integra al scoring sin rechazar SoftFail ciegamente.
+- Registro a publicar: `v=spf1 mx ~all` (el admin añade sus IPs).
+
+### DKIM (RFC 6376)
+- Firma en salida (RSA-SHA256, canonicalización relaxed/simple) en el worker si el dominio tiene la clave.
+- Verificación en recepción: extrae `DKIM-Signature`, obtiene clave pública de
+  `<selector>._domainkey.<dominio>`, verifica firma + body hash.
+- Selector por defecto `atlasmail`. Clave privada almacenada, jamás expuesta por API.
+- Registro a publicar: `v=DKIM1; k=rsa; p=<clave-pública>` en `atlasmail._domainkey.<dominio>` TXT.
+
+### DMARC (RFC 7489)
+- Evaluación con alineación SPF/DKIM (relaxed/strict; registrable-domain para ccTLD).
+- Política configurable por dominio: none / quarantine / reject (`Delivery:DmarcEnforce` controla si se aplica).
+- Registro a publicar: `_dmarc.<dominio>` TXT: `v=DMARC1; p=<policy>; adkim=r; aspf=r; fo=1`.
+
+### Endpoints admin (SuperAdmin)
+- `GET /api/admin/domain/{id}/auth` — estado y registros DNS a publicar.
+- `POST /api/admin/domain/{id}/auth/dkim/enable` — genera clave DKIM + registro TXT del selector.
+- `POST /api/admin/domain/{id}/auth/dmarc` — body: `"none"|"quarantine"|"reject"`.
+
 ## IMAP / Webmail / Búsqueda
 - IMAP: FASE 3 (arriba).
 - Webmail: RFC-compatible a nivel de metadatos vía API interna (no protocolo wire).

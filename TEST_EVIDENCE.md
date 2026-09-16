@@ -1,8 +1,60 @@
-# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 + FASE 3)
+# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 + FASE 3 + FASE 4)
 
-Fecha FASE 3: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425, credencial DB local.
+Fecha FASE 4: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
 
-## FASE 3 — Definition of Done
+## FASE 4 — Definition of Done
+
+| Requisito FASE 4 (spec §17-19) | Resultado | Evidencia |
+|---|---|---|
+| `dotnet build -c Release` → 0 errores | ✅ | `0 Advertencias / 0 Errores` |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **94/94** + Integration **17/17** = **111/111** |
+| SPF verificación (RFC 7208) | ✅ | `SpfEvaluator` unit: ip4/a/include/redirect/macro/SoftFail/Neutral/None/Fail/PermError |
+| DKIM firma + verificación (RFC 6376) | ✅ | Roundtrip `Dkim.Sign`→`Verify` pasa; body-tampered NO pasa; canonicalización relaxed/simple |
+| DKIM firma en salida (worker) | ✅ | `DkimOutboundSigner`: firma si el dominio tiene clave; sin clave → intacto |
+| DMARC evaluación (RFC 7489) | ✅ | `DmarcEvaluator`: alignment relaxed/strict, registrable-domain ccTLD, p=none/reject |
+| Política DMARC aplicada | ✅ | `EmailAuthenticationService` → `ShouldReject`/`ShouldQuarantine`; integrada a la ingesta |
+| Admin DNS por dominio | ✅ | `DomainMailAuthService` + endpoints: SPF/DKIM/DMARC records a publicar |
+| Clave privada no expuesta | ✅ | API devuelve `dkimPrivateKeyHint`, no la clave |
+| Audit de auth | ✅ | metadata de mensaje: `auth=[spf=.. dkim=.. dmarc=..]` |
+
+## Ejecuciones reales FASE 4
+
+### Build / Tests
+```
+Compilación correcta.  0 Advertencia(s)  0 Errores
+AtlasMail.UnitTests.dll:  Correctas!  94/94 (0 error)
+AtlasMail.IntegrationTests.dll: Correctas!  17/17 (0 error)
+```
+
+### Tests relevantes (unit)
+```
+SPF: Pass ip4 · Fail ip no autorizada (-all) · SoftFail ~all · Neutral ?all · None sin registro ·
+     Pass a/ · Pass include · Pass redirect · macro %{i} · PermError sin all
+DKIM: roundtrip Pass (256/1024 RSA) · body-tampered !=  Pass · canonicalización relaxed/simple
+DMARC: p=none Pass no reject · p=reject Fail → reject · NoRecord sin registro
+DomainMailAuth: enable DKIM → selector + registro TXT v=DKIM1;k=rsa;p= ; set DMARC reject / inválido rechazado
+DkimOutboundSigner: firma si dominio habilitado; intacto si no
+```
+
+### Smoke admin (integration)
+```
+POST /api/admin/domain authadmin.local                 -> {"id":..}
+GET  /api/admin/domain/{id}/auth                       -> dkimEnabled:false, spfRecordToPublish:"v=spf1 mx ~all"
+POST /api/admin/domain/{id}/auth/dkim/enable           -> dkimEnabled:true, dkimSelector:"atlasmail",
+                                                           dkimPublicKeyRecord:"v=DKIM1; k=rsa; p=...",
+                                                           dkimPrivateKeyHint:"clave privada almacenada (no expuesta)"
+POST /api/admin/domain/{id}/auth/dmarc "reject"        -> dmarcPolicy:"reject", dmarcRecordToPublish:"v=DMARC1; p=reject; ..."
+POST /api/admin/domain/{id}/auth/dmarc "bogus"         -> 400
+```
+
+### Nota de honestidad (FASE 4)
+La verificación SPF/DKIM/DMARC en recepción consulta DNS público; en la suite sin red se valida el flujo
+con dominios inexistentes (SPF None / DKIM none / DMARC NoRecord). La firma/verificación DKIM real
+se valida por roundtrip criptográfico (unit). La compatibilidad de autenticación de correo contra
+proveedores reales requiere DNS público y reputación IP (EXTERNAL), no se declara PROVEN sin prueba real.
+
+## FASE 3 — evidencia (para referencia)
+Unit 73/73 + Integration 15/15 (IMAP E2E real; login inválido).
 
 | Requisito FASE 3 (spec §10) | Resultado | Evidencia |
 |---|---|---|
