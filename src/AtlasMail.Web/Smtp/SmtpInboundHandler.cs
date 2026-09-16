@@ -1,5 +1,7 @@
 using AtlasMail.Application;
 using AtlasMail.Application.Abstractions;
+using AtlasMail.Domain.Entities;
+using AtlasMail.Domain.Enums;
 using AtlasMail.Domain.Rules;
 using AtlasMail.Domain.ValueObjects;
 using AtlasMail.Protocols.Smtp;
@@ -11,18 +13,69 @@ namespace AtlasMail.Web.Smtp;
 /// Implementa ISmtpMessageHandler: valida el envelope con la política de relay
 /// (sección 5) y procesa el mensaje mediante la ingesta local.
 /// NO OPEN RELAY: una conexión anónima sólo puede entregar a buzones locales válidos.
+/// Autenticación AUTH PLAIN/LOGIN contra buzones locales (FASE 2): un cliente
+/// autenticado puede enviar a dominios externos conforme a política.
 /// </summary>
 public class SmtpInboundHandler : ISmtpMessageHandler
 {
     private readonly IAddressResolutionService _resolver;
     private readonly IInboundDeliveryService _inbound;
     private readonly IApplicationDbContext _db;
+    private readonly IPasswordHasher _hasher;
     private readonly ILogger<SmtpInboundHandler> _logger;
 
     public SmtpInboundHandler(IAddressResolutionService resolver, IInboundDeliveryService inbound,
-        IApplicationDbContext db, ILogger<SmtpInboundHandler> logger)
+        IApplicationDbContext db, IPasswordHasher hasher, ILogger<SmtpInboundHandler> logger)
     {
-        _resolver = resolver; _inbound = inbound; _db = db; _logger = logger;
+        _resolver = resolver; _inbound = inbound; _db = db; _hasher = hasher; _logger = logger;
+    }
+
+    public async Task<string> AuthenticateAsync(string username, string password, SmtpSessionContext ctx, CancellationToken ct = default)
+    {
+        // username local form: user@dominio o user; password es la del buzón (o usuario web).
+        string localPart;
+        string? domainPart;
+        if (EmailAddress.TryParse(username, out var parsed))
+        {
+            localPart = parsed.LocalPart;
+            domainPart = parsed.Domain;
+        }
+        else
+        {
+            localPart = (username ?? string.Empty).Trim();
+            domainPart = null;
+        }
+
+        // Buscar buzón por localpart (+ dominio si se dio), con password hash
+        Mailbox mb;
+        if (!string.IsNullOrWhiteSpace(domainPart))
+        {
+            mb = await _db.Mailboxes.Include(m => m.Domain)
+                .FirstOrDefaultAsync(m => m.LocalPart == localPart && m.Domain!.Name == domainPart && m.Status == MailboxStatus.Active, ct);
+        }
+        else
+        {
+            // Sin dominio: intentar en cualquier dominio local (debe haber uno y solo uno con ese localpart)
+            mb = await _db.Mailboxes.AsNoTracking()
+                .FirstOrDefaultAsync(m => m.LocalPart == localPart && m.Status == MailboxStatus.Active, ct);
+        }
+
+        if (mb == null || string.IsNullOrEmpty(mb.PasswordHash))
+        {
+            _logger.LogInformation("SMTP AUTH falló {User}: buzón no encontrado o sin hash", username);
+            return "535 5.7.8 Authentication credentials invalid";
+        }
+
+        if (_hasher.Verify(password, mb.PasswordHash))
+        {
+            ctx.Authenticated = true;
+            ctx.AuthUsername = mb.EmailAddress;
+            _logger.LogInformation("SMTP AUTH OK {User}", mb.EmailAddress);
+            return "235 2.7.0 Authentication successful";
+        }
+
+        _logger.LogInformation("SMTP AUTH falló {User}: password incorrecto", username);
+        return "535 5.7.8 Authentication credentials invalid";
     }
 
     public async Task<string> ValidateEnvelopeAsync(string mailFrom, string rcptTo, SmtpSessionContext ctx, CancellationToken ct = default)
@@ -40,7 +93,7 @@ public class SmtpInboundHandler : ISmtpMessageHandler
         var decision = RelayPolicy.Evaluate(
             mailFrom: mailFromAddr ?? default,
             rcptTo: rcptAddr,
-            authenticated: false, // AUTH aún no en este ciclo; webmail usa submission autenticado por sesión
+            authenticated: ctx.Authenticated,
             domainIsLocal: domainLocal,
             rcptExistsLocally: resolved.Found,
             allowAuthSend: allowAuthSend);

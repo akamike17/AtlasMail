@@ -121,6 +121,8 @@ public class Message
     public SpamDecision SpamDecision { get; set; } = SpamDecision.None;
     public double SpamScore { get; set; }
     public string? InReplyTo { get; set; }
+    /// <summary>Flag \Deleted de IMAP: marcado por STORE +Deleted y purgado por EXPUNGE.</summary>
+    public bool IsDeleted { get; set; }
 
     [JsonIgnore] public ICollection<MessageRecipient> Recipients { get; } = new List<MessageRecipient>();
     [JsonIgnore] public ICollection<Attachment> Attachments { get; } = new List<Attachment>();

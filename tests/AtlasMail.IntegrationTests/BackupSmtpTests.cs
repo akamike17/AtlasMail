@@ -175,4 +175,44 @@ public class SmtpE2ETests : IAsyncLifetime
         var inbox = await (await bobClient.GetAsync("/api/mail/folders")).Content.ReadAsStringAsync();
         Body(inbox).GetArrayLength().Should().BeGreaterThan(0);
     }
+
+    [Fact]
+    public async Task Smtp_AUTH_PLAIN_legitimo_y_login_desde_Tcp()
+    {
+        // Preparar dominio + buzón con password
+        var admin = await _factory.CreateAdminClientAsync();
+        var d = await (await admin.PostAsJsonAsync("/api/admin/domain", new { name = "auth.local" })).Content.ReadAsStringAsync();
+        long domId = Body(d).GetProperty("id").GetInt64();
+        await admin.PostAsJsonAsync("/api/admin/mailbox", new { domainId = domId, localPart = "authuser", displayName = "Auth User", password = "Atl4smail1!" });
+
+        var scopeFactory = _factory.Services.GetRequiredService<IServiceScopeFactory>();
+        _server = new SmtpServer(scopeFactory, new SmtpServerOptions { Port = 0, Hostname = "atlasmail.local" });
+        _server.Start();
+        int port = _server.EffectivePort;
+
+        // AUTH PLAIN inline (base64 "\0user@auth.local\0password")
+        string plain = Convert.ToBase64String(Encoding.UTF8.GetBytes("\0authuser@auth.local\0Atl4smail1!"));
+        string okReply, badReply;
+        using (var c = new TcpClient())
+        {
+            await c.ConnectAsync("127.0.0.1", port).WaitAsync(TimeSpan.FromSeconds(5));
+            var reader = new StreamReader(c.GetStream(), Encoding.ASCII);
+            var writer = new StreamWriter(c.GetStream(), Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+            await reader.ReadLineAsync(); // 220
+            await writer.WriteLineAsync("EHLO test");
+            // Consumir toda la respuesta EHLO multilínea: líneas "250-*" (posición 3 == '-')
+            // hasta la que NO es continuada ("250 HELP" con espacio en posición 3).
+            while (true) { var l = await reader.ReadLineAsync() ?? "250"; if (l.Length < 4 || l[3] != '-') break; }
+            await writer.WriteLineAsync("AUTH PLAIN " + plain);
+            okReply = await reader.ReadLineAsync() ?? string.Empty;
+            // AUTH fallida
+            string badPlain = Convert.ToBase64String(Encoding.UTF8.GetBytes("\0authuser@auth.local\0Passw0rd!"));
+            await writer.WriteLineAsync("AUTH PLAIN " + badPlain);
+            badReply = await reader.ReadLineAsync() ?? string.Empty;
+            await writer.WriteLineAsync("QUIT");
+        }
+
+        okReply.Should().StartWith("235");
+        badReply.Should().StartWith("535");
+    }
 }

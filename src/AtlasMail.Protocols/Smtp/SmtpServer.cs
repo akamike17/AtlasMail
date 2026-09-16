@@ -12,6 +12,13 @@ public interface ISmtpMessageHandler
 
     /// <summary>Procesa el mensaje completo. Retorna formato "250 OK" o "550 ...".</summary>
     Task<string> HandleMessageAsync(string mailFrom, string rcptTo, byte[] rawMime, SmtpSessionContext ctx, CancellationToken ct = default);
+
+    /// <summary>
+    /// Autentica un usuario SMTP (AUTH PLAIN/LOGIN). Devuelve "235 2.7.0 OK" en éxito,
+    /// "535 5.7.8 Authentication credentials invalid" en fallo.
+    /// El servidor establece ctx.Authenticated/AuthUsername tras éxito.
+    /// </summary>
+    Task<string> AuthenticateAsync(string username, string password, SmtpSessionContext ctx, CancellationToken ct = default);
 }
 
 /// <summary>Delegado del sobre dirigido a AUTH (starttls/auth — por ahora extensible).</summary>
@@ -150,10 +157,10 @@ public sealed class SmtpServer : IAsyncDisposable
                 }
 
                 if (upper == "QUIT") { await writer.WriteAsync("221 Bye\r\n"); break; }
-                else if (upper == "EHLO" || upper == "HELO")
+                else if (upper == "EHLO" || upper.StartsWith("EHLO ") || upper == "HELO" || upper.StartsWith("HELO "))
                 {
-                    // EHLO extensible
-                    var ehlo = upper == "EHLO";
+                    // EHLO extensible (los clientes reales envían "EHLO hostname")
+                    var ehlo = upper == "EHLO" || upper.StartsWith("EHLO ");
                     ctx.Helo = GetArg(cmd);
                     welcomeReceived = true;
                     if (ehlo)
@@ -161,7 +168,7 @@ public sealed class SmtpServer : IAsyncDisposable
                         await writer.WriteAsync($"250-{_options.Hostname} Hello\r\n");
                         await writer.WriteAsync("250-SIZE " + _options.MaxMessageBytes + "\r\n");
                         await writer.WriteAsync("250-8BITMIME\r\n");
-                        await writer.WriteAsync("250-AUTH PLAIN\r\n");
+                        await writer.WriteAsync("250-AUTH PLAIN LOGIN\r\n");
                         await writer.WriteAsync("250-ENHANCEDSTATUSCODES\r\n");
                         await writer.WriteAsync("250 HELP\r\n");
                     }
@@ -170,10 +177,71 @@ public sealed class SmtpServer : IAsyncDisposable
                         await writer.WriteAsync($"250 {_options.Hostname} Hello\r\n");
                     }
                 }
-                else if (upper == "AUTH PLAIN" || upper.StartsWith("AUTH"))
+                else if (upper == "AUTH PLAIN" || upper.StartsWith("AUTH PLAIN "))
                 {
-                    // AUTH PLAIN: aceptar credenciales; marcamos autenticado tras validar (a implementar por handler)
-                    await writer.WriteAsync("503 AUTH not yet configured\r\n");
+                    // AUTH PLAIN: credenciales inline (base64 "\0user\0pass") o vía desafío
+                    string b64 = upper == "AUTH PLAIN" ? string.Empty : cmd[(cmd.ToUpperInvariant().LastIndexOf("PLAIN") + 6)..].Trim();
+                    string? resp = null;
+                    if (string.IsNullOrWhiteSpace(b64))
+                    {
+                        await writer.WriteAsync("334 \r\n");
+                        string? challenge = null;
+                        try { challenge = await reader.ReadLineAsync(token); } catch { }
+                        if (challenge == null) break;
+                        resp = challenge.TrimEnd('\r');
+                    }
+                    else resp = b64;
+                    var auth = DecodePlainAuth(resp);
+                    if (auth == null) { await writer.WriteAsync("501 5.7.0 Invalid AUTH PLAIN\r\n"); continue; }
+                    var ar = await SafeHandleAsync(() => handler.AuthenticateAsync(auth.Value.Username, auth.Value.Password, ctx, token));
+                    if (ar.StartsWith("235"))
+                    {
+                        ctx.Authenticated = true;
+                        ctx.AuthUsername = auth.Value.Username;
+                        await writer.WriteAsync(ar + "\r\n");
+                    }
+                    else
+                    {
+                        ctx.Authenticated = false;
+                        await writer.WriteAsync((ar.StartsWith("535") ? ar : "535 5.7.8 Authentication credentials invalid") + "\r\n");
+                    }
+                }
+                else if (upper == "AUTH LOGIN" || upper.StartsWith("AUTH LOGIN "))
+                {
+                    // AUTH LOGIN (legacy): desafío USERNAME, luego PASSWORD base64
+                    string b64User = upper == "AUTH LOGIN" ? string.Empty : cmd[(cmd.ToUpperInvariant().LastIndexOf("LOGIN") + 6)..].Trim();
+                    string? username = null;
+                    if (!string.IsNullOrWhiteSpace(b64User)) username = DecodeUtf8(b64User);
+                    else
+                    {
+                        await writer.WriteAsync("334 VXNlcm5hbWU6\r\n");
+                        string? u = null;
+                        try { u = await reader.ReadLineAsync(token); } catch { }
+                        if (u == null) break;
+                        username = DecodeUtf8(u.TrimEnd('\r'));
+                    }
+                    await writer.WriteAsync("334 UGFzc3dvcmQ6\r\n");
+                    string? p = null;
+                    try { p = await reader.ReadLineAsync(token); } catch { }
+                    if (p == null) break;
+                    var password = DecodeUtf8(p.TrimEnd('\r'));
+                    if (username == null || password == null) { await writer.WriteAsync("501 5.7.0 Invalid AUTH LOGIN\r\n"); continue; }
+                    var ar = await SafeHandleAsync(() => handler.AuthenticateAsync(username, password, ctx, token));
+                    if (ar.StartsWith("235"))
+                    {
+                        ctx.Authenticated = true;
+                        ctx.AuthUsername = username;
+                        await writer.WriteAsync(ar + "\r\n");
+                    }
+                    else
+                    {
+                        ctx.Authenticated = false;
+                        await writer.WriteAsync((ar.StartsWith("535") ? ar : "535 5.7.8 Authentication credentials invalid") + "\r\n");
+                    }
+                }
+                else if (upper.StartsWith("AUTH"))
+                {
+                    await writer.WriteAsync("504 5.5.4 Unrecognized authentication type\r\n");
                 }
                 else if (upper.StartsWith("MAIL FROM:"))
                 {
@@ -247,6 +315,26 @@ public sealed class SmtpServer : IAsyncDisposable
     {
         int sp = cmd.IndexOf(' ');
         return sp < 0 ? string.Empty : cmd[(sp + 1)..];
+    }
+
+    private static (string Username, string Password)? DecodePlainAuth(string base64)
+    {
+        try
+        {
+            var raw = Convert.FromBase64String(base64.Trim());
+            var parts = System.Text.Encoding.UTF8.GetString(raw).Split('\0');
+            if (parts.Length < 3) return null;
+            string user = parts[^2], pass = parts[^1];
+            return string.IsNullOrWhiteSpace(user) || pass == null ? null : (user, pass);
+        }
+        catch { return null; }
+    }
+
+    private static string? DecodeUtf8(string? base64)
+    {
+        if (string.IsNullOrWhiteSpace(base64)) return null;
+        try { return System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(base64.Trim())); }
+        catch { return null; }
     }
 
     private static string? ParsePath(string cmd, string prefix)

@@ -52,3 +52,77 @@ public sealed record MessageSearchQuery(
 public sealed record SearchResult(
     long MessageId, string SenderAddress, string Subject, DateTime DateUtc,
     string BodyPreview, bool IsHtml, bool IsRead, bool IsFlagged, long SizeBytes);
+
+/// <summary>
+/// Resolución de MX para entrega externa (FASE 2, sección 8).
+/// Devuelve los servidores de intercambio de correo de un dominio por prioridad.
+/// Fallback: si el dominio no publica MX, se usa el registro A (RFC 5321 §5.1).
+/// </summary>
+public interface IMxResolver
+{
+    /// <summary>
+    /// Resuelve los servidores SMTP de un dominio, ordenados por preferencia (menor = mayor prioridad).
+    /// Puede devolver una lista vacía si no hay MX ni A resolubles.
+    /// </summary>
+    Task<IReadOnlyList<MailExchange>> ResolveAsync(string domainName, CancellationToken ct = default);
+}
+
+/// <summary>Un intercambio MX resuelto: host + preferencia (port 25 salvo override para tests).</summary>
+public sealed record MailExchange(string Host, int Preference, int Port = 25);
+
+/// <summary>
+/// Aplica la política de envío autenticado / límites de entrega externa (FASE 2).
+/// Encapsula la lectura de policy y la clasificación de errores 4xx/5xx para el worker.
+/// </summary>
+public interface IExternalDeliveryPolicy
+{
+    /// <summary>¿Puede este dominio local encaminar correo a destinos externos?</summary>
+    Task<bool> AllowDomainExternalSendAsync(string domainName, CancellationToken ct = default);
+}
+
+/// <summary>Resultado de enviar un mensaje a un host SMTP concreto.</summary>
+public sealed record SmtpSendResult(bool Success, string Response, bool Temporary)
+{
+    /// <summary>El fallo es permanente (5xx) → bounce/DSN.</summary>
+    public bool Permanent => !Success && !Temporary;
+}
+
+/// <summary>Opciones de envío externo (TLS, credenciales).</summary>
+public sealed record SmtpSendOptions(bool StartTlsRequired, string? Username, string? Password);
+
+/// <summary>
+/// Envío de un MIME a un host remoto por SMTP. Implementación en Protocols
+/// (SmtpClient); abstraída aquí para que Application no dependa de Protocols.
+/// </summary>
+public interface IExternalMailSender
+{
+    Task<SmtpSendResult> SendAsync(string host, int port, string mailFrom, IReadOnlyList<string> rcptList,
+        byte[] rawMime, string heloName, SmtpSendOptions options, CancellationToken ct = default);
+}
+
+/// <summary>Configuración global de entrega externa (FASE 2, sección 8).</summary>
+public sealed record ExternalDeliverySettings(
+    int MaxRetries = 6,
+    TimeSpan ConnectTimeout = default,
+    bool StartTlsRequiredForExternal = false,
+    int RateLimitPerMinute = 0,          // 0 = sin límite
+    int RateLimitPerDomainPerMinute = 0, // 0 = sin límite
+    string? HeloName = null);
+
+/// <summary>
+/// Resultado de la entrega externa (por conectar al worker): decide si reintentar,
+/// fallar permanente o reencolar. Applied por OutboundQueueService.
+/// </summary>
+public sealed record ExternalDeliveryOutcome(
+    bool Delivered,
+    string? RemoteResponse,
+    ExternalOutcomeKind Kind);
+
+public enum ExternalOutcomeKind
+{
+    Delivered,
+    TemporaryFailure,   // reintentar (4xx / timeout / DNS unavailability)
+    PermanentFailure,   // 5xx → bounce/DSN
+    PolicyDenied,       // dominio no autorizado a enviar externo
+    NoMxEntry
+}

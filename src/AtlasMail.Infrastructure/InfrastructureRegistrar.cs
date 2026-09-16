@@ -1,11 +1,15 @@
 using AtlasMail.Application;
 using AtlasMail.Application.Abstractions;
 using AtlasMail.Application.Services;
+using AtlasMail.Infrastructure.Dns;
+using AtlasMail.Infrastructure.Imap;
 using AtlasMail.Infrastructure.Persistence;
 using AtlasMail.Infrastructure.Storage;
+using DnsClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace AtlasMail.Infrastructure;
 
@@ -39,6 +43,35 @@ public static class InfrastructureRegistrar
         services.AddScoped<IRuleEngine, RuleEngine>();
         services.AddScoped<IAttachmentScanner, NoOpAttachmentScanner>();
         services.AddSingleton<IMailIntelligenceService, DisabledMailIntelligenceService>();
+
+        // FASE 2: entrega externa (DNS MX + política + rate limit)
+        services.AddSingleton<IMxResolver>(sp =>
+        {
+            var logger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("AtlasMail.Infrastructure.Dns.DnsMxResolver");
+            var dns = new LookupClientOptions
+            {
+                UseCache = true,
+                Timeout = TimeSpan.FromSeconds(5),
+                Retries = 1,
+                ThrowDnsErrors = false,
+                UseTcpOnly = false,
+                UseTcpFallback = true,
+            };
+            return new DnsMxResolver(dns, logger);
+        });
+        services.AddScoped<IExternalDeliveryPolicy, ExternalDeliveryPolicy>();
+        services.AddSingleton(new ExternalDeliverySettings(
+            MaxRetries: config.GetValue("Delivery:MaxRetries", 6),
+            ConnectTimeout: TimeSpan.FromSeconds(config.GetValue("Delivery:ConnectTimeoutSeconds", 60)),
+            StartTlsRequiredForExternal: config.GetValue("Delivery:StartTlsRequired", false),
+            RateLimitPerMinute: config.GetValue("Delivery:RateLimitPerMinute", 0),
+            RateLimitPerDomainPerMinute: config.GetValue("Delivery:RateLimitPerDomainPerMinute", 0),
+            HeloName: config["Delivery:HeloName"]));
+        services.AddSingleton<AtlasMail.Domain.Rules.SlidingWindowRateLimiter>(_ => new AtlasMail.Domain.Rules.SlidingWindowRateLimiter(60));
+        // IExternalMailSender se registra donde se disponen el SmtpClient (AtlasMail.Web / Worker).
+
+        // FASE 3: backend IMAP sobre MySQL/metadata + IMessageStore (protocolo desacoplado)
+        services.AddScoped<IMailboxBackend, MySqlMailboxBackend>();
         services.AddScoped<IBackupService>(sp => new BackupService(
             sp.GetRequiredService<AtlasMailDbContext>(),
             sp.GetRequiredService<IMessageStore>(),

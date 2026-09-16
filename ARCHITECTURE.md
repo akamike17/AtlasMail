@@ -1,7 +1,9 @@
 # AtlasMail — Arquitectura
 
 Servidor empresarial de correo y colaboración self-hosted. Multi-dominio.
-Ciclo 1: vertical slice funcional (ADMIN → dominio → buzones → webmail → SMTP → cola → trace → backup → audit).
+**Ciclo 1**: vertical slice funcional (ADMIN → dominio → buzones → webmail → SMTP → cola → trace → backup → audit).
+**FASE 2**: SMTP robusto + entrega externa (MX/DNS real, STARTTLS, AUTH, bounces seguros, rate limits, observabilidad).
+**FASE 3**: IMAP4rev1 y clientes externos (servidor IMAP desacoplado del almacenamiento, migración `ImapDeletedFlag`).
 
 ## Stack
 - ASP.NET Core 8 (MVC + Razor + JS `fetch()`), Bootstrap local (sin CDN).
@@ -15,7 +17,7 @@ src/AtlasMail.Domain         Entidades, enums, EmailAddress, reglas puras (relay
 src/AtlasMail.Application    IApplicationDbContext (contrato), DTOs, servicios de caso de uso, abstracciones IMessageStore/ISearch/IScanner/IIA.
 src/AtlasMail.Infrastructure EF Core (AtlasMailDbContext + Pomelo), FileSystemMessageStore, seed/migraciones, DI registrar.
 src/AtlasMail.Security       PBKDF2 IPasswordHasher + IPasswordPolicy.
-src/AtlasMail.Protocols      Servidor SMTP (state machine RFC 5321) + Cliente SMTP (outbound).
+src/AtlasMail.Protocols      Servidor SMTP (state machine RFC 5321) + Cliente SMTP (outbound) + servidor IMAP4rev1 (RFC 3501).
 src/AtlasMail.Web            Program.cs, controllers MVC + [ApiController], vistas Razor, antiforgery/deny-by-default, hosted SMTP.
 src/AtlasMail.Worker         DeliveryWorker: cola de salida con lease/claim + retry/backoff.
 tests/AtlasMail.UnitTests    Lógica pura + servicios con FakeAppDbContext (InMemory).
@@ -24,6 +26,17 @@ tests/AtlasMail.IntegrationTests  MySQL temporal dedicado via WebApplicationFact
 Dependencias: Domain → (nada); Application → Domain; Infrastructure → Application+Domain+Security;
 Protocols → Infrastructure+Application; Security → Application+Domain; Worker → Infrastructure+Protocols;
 Web → Infrastructure+Application+Protocols+Security+Worker.
+
+## IMAP (spec §10) — FASE 3
+- `AtlasMail.Protocols.Imap.ImapServer` (state machine multihilo, RFC 3501) + `ImapSession`.
+- Desacoplado del almacenamiento: `IMailboxBackend` (Application) → `MySqlMailboxBackend` (Infrastructure)
+  sobre metadatos MySQL + `IMessageStore`. El protocolo IMAP no conoce el modelo de datos.
+- Comandos FASE 3: LOGIN, CAPABILITY, NOOP, LIST/LSUB, SELECT/EXAMINE, STATUS, FETCH (flags, uid, tamaño,
+  INTERNALDATE, BODY[]/RFC822.HEADER/BODY[TEXT]), STORE (\Seen \Flagged \Deleted, SILENT, replace), SEARCH,
+  MOVE, UID, EXPUNGE, CLOSE, LOGOUT. APPEND no-persistente (documentado).
+- `Message.IsDeleted` para el flag \Deleted (migración `ImapDeletedFlag`).
+- Compatibilidad con Thunderbird/Outlook/Apple Mail pendiente de prueba real (§44).
+- Hosted service `ImapHostedService` inicia el listener (puerto 143 o `Imap:Port`).
 
 ## Persistencia y almacenamiento de mensajes (spec §1)
 - **No** se guarda MIME completo en MySQL.
@@ -44,6 +57,10 @@ CONNECT → POLICY(relay) → ENVELOPE(MAIL/RCPT) → DATA → MIME PARSE → SE
 - Estados: Pending/Processing/Deferred/Delivered/Failed/DeadLetter.
 - Lease/claim transaccional (worker reclama atómicamente; lease caduca → crash recovery).
 - Retry con backoff exponencial, tope, sin loops infinitos, dead-letter.
+- **FASE 2**: entrega externa real en el worker. Resuelve MX (`IMxResolver`/DnsClient, fallback A),
+  entrega con `SmtpClient` (STARTTLS oportunista/obligatorio, AUTH opcional), clasifica 4xx (reintenta)
+  vs 5xx (falla y genera bounce/DSN seguro sin backscatter). Rate limits por usuario/dominio
+  (`SlidingWindowRateLimiter`). IExternalMailSender abstrae el SmtpClient para la capa Application.
 
 ## Seguridad (spec §4, 33)
 - **Deny-by-default**: filtro global `RequireAuthenticatedUser`; `[AllowAnonymous]` sólo en login/token/health.

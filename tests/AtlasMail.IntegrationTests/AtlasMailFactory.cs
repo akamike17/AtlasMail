@@ -40,6 +40,8 @@ public class AtlasMailFactory : WebApplicationFactory<AtlasMail.Web.Program>
         Environment.SetEnvironmentVariable("Storage__BackupPath",
             Path.Combine(Path.GetTempPath(), "atlasmail_backup_" + Guid.NewGuid().ToString("N")));
         Environment.SetEnvironmentVariable("Smtp__Enabled", "0");
+        Environment.SetEnvironmentVariable("Imap__Enabled", "0");
+        Environment.SetEnvironmentVariable("Delivery__DnsProbeEnabled", "false");
         Environment.SetEnvironmentVariable("Admin__Username", "admin");
         Environment.SetEnvironmentVariable("Admin__Password", "Atl4smail1!");
         Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Development");

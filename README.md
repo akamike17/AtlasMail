@@ -2,7 +2,7 @@
 
 Servidor empresarial de correo y colaboración self-hosted y multi-dominio (.NET 8 + MySQL).
 
-**Estado del Ciclo 1 (definición de éxito §51): COMPLETADO** — vertical slice funcional probado E2E.
+**Estado: Ciclo 1 + FASE 2 + FASE 3 completadas** (SMTP robusto + entrega externa + IMAP).
 
 ## Documentación
 - `ARCHITECTURE.md` — proyectos, pipeline SMTP, cola, seguridad, modelo multi-dominio.

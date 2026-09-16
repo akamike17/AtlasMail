@@ -1,8 +1,12 @@
 using AtlasMail.Application;
+using AtlasMail.Application.Abstractions;
+using AtlasMail.Application.Services;
 using AtlasMail.Infrastructure;
 using AtlasMail.Infrastructure.Persistence;
+using AtlasMail.Protocols.Imap;
 using AtlasMail.Protocols.Smtp;
 using AtlasMail.Security;
+using AtlasMail.Web.Imap;
 using AtlasMail.Web.Smtp;
 using AtlasMail.Worker;
 using Microsoft.AspNetCore.Authentication;
@@ -100,6 +104,42 @@ builder.Services.AddSingleton<SmtpServer>(sp =>
 builder.Services.AddHostedService<SmtpHostedService>();
 builder.Services.AddHostedService<DeliveryWorker>();
 
+// FASE 3: servidor IMAP4rev1 (desacoplado del almacenamiento vía IMailboxBackend)
+// Siempre registrado; el flag Enabled decide si abre el listener (0 en CI).
+builder.Services.AddSingleton<ImapServer>(sp =>
+{
+    var scopeFactory = sp.GetRequiredService<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>();
+    return new ImapServer(scopeFactory,
+        new ImapServerOptions
+        {
+            Port = builder.Configuration.GetValue<int>("Imap:Port", 143),
+            Hostname = builder.Configuration["Imap:Hostname"] ?? "atlasmail.local",
+            MaxMessageBytes = (int)builder.Configuration.GetValue<long>("Imap:MaxMessageBytes", 50 * 1024 * 1024),
+            Enabled = builder.Configuration.GetValue<int>("Imap:Enabled") == 1
+        },
+        sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>().CreateLogger<ImapServer>());
+});
+builder.Services.AddHostedService<ImapHostedService>();
+
+// FASE 2: entrega externa (SMTP outbound) + DNS health.
+// ExternalDeliveryService es scoped porque depende de IExternalDeliveryPolicy (BD);
+// el DeliveryWorker resuelve dentro de un scope por elemento de cola.
+builder.Services.AddScoped<IExternalMailSender>(sp =>
+    new SmtpExternalMailSender(
+        sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>().CreateLogger<SmtpClient>(),
+        TimeSpan.FromSeconds(builder.Configuration.GetValue("Delivery:ConnectTimeoutSeconds", 60))));
+builder.Services.AddScoped<ExternalDeliveryService>();
+
+// DNS health probe (FASE 2) — opcional para no depender de red real en CI
+if (builder.Configuration.GetValue("Delivery:DnsProbeEnabled", true))
+{
+    builder.Services.AddHostedService(sp => new DnsHealthProbe(
+        sp.GetRequiredService<AtlasMail.Application.Abstractions.IMxResolver>(),
+        sp.GetRequiredService<AtlasMail.Web.Smtp.IHealthCheckSubscriber>(),
+        sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>().CreateLogger<DnsHealthProbe>(),
+        builder.Configuration["Delivery:DnsProbeDomain"] ?? "gmail.com"));
+}
+
 var app = builder.Build();
 
 if (!app.Environment.IsDevelopment())
@@ -141,8 +181,28 @@ app.MapGet("/api/antiforgery/token", (Microsoft.AspNetCore.Antiforgery.IAntiforg
         return Results.Ok(new { token = tokens.RequestToken });
 }).AllowAnonymous();
 
-app.MapGet("/api/health", (AtlasMail.Web.Smtp.IHealthCheckSubscriber health) =>
-    Results.Ok(new { status = "ok", components = health.Snapshot() })).AllowAnonymous();
+app.MapGet("/api/health", (AtlasMail.Web.Smtp.IHealthCheckSubscriber health, AtlasMail.Application.IOutboundQueueService queue) =>
+    {
+        // FASE 2: métricas de cola en el health endpoint
+        var list = queue.ListAsync(take: 1000).GetAwaiter().GetResult();
+        var counts = list
+            .GroupBy(q => q.State)
+            .ToDictionary(g => g.Key.ToString(), g => g.Count());
+        return Results.Ok(new
+        {
+            status = "ok",
+            components = health.Snapshot(),
+            queue = new
+            {
+                pending = counts.GetValueOrDefault("Pending", 0),
+                processing = counts.GetValueOrDefault("Processing", 0),
+                deferred = counts.GetValueOrDefault("Deferred", 0),
+                delivered = counts.GetValueOrDefault("Delivered", 0),
+                failed = counts.GetValueOrDefault("Failed", 0),
+                deadLetter = counts.GetValueOrDefault("DeadLetter", 0)
+            }
+        });
+    }).AllowAnonymous();
 
 // Bootstrap: migraciones + admin inicial desde config (nunca password hardcoded en repo)
 using (var scope = app.Services.CreateScope())

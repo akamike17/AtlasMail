@@ -49,9 +49,39 @@ export Smtp__Port=2525
 export Smtp__Hostname='mail.midominio.com'
 ```
 
-## 5. Ejecutar
+## 5. Entrega externa (FASE 2)
+La entrega a dominios externos resuelve MX real (DNS del sistema; DnsClient). Configuración opcional:
+
 ```bash
-# Web (admin + webmail) — arranca también SMTP (si enabled) y el worker de cola
+export Delivery__ConnectTimeoutSeconds=60        # timeout por conexión SMTP
+export Delivery__MaxRetries=6                    # reintentos máximos por mensaje
+export Delivery__StartTlsRequired=false          # true exige STARTTLS (DANE/estricto)
+export Delivery__RateLimitPerMinute=0            # 0 = sin límite (mensajes/min por remitente)
+export Delivery__RateLimitPerDomainPerMinute=0   # 0 = sin límite (mensajes/min por dominio destino)
+export Delivery__HeloName='mail.midominio.com'   # EHLO del MTA saliente
+export Delivery__DnsProbeEnabled=true            # health: resuelve MX periódicamente
+export Delivery__DnsProbeDomain='gmail.com'      # dominio que usa el probe de DNS
+```
+
+Los fallos permanentes (5xx) generan un DSN/bounce al remitente **solo** si es un buzón local válido
+(anti-backscatter). La resolución DNS real no requiere configuración (usa los servidores del sistema).
+
+## 6. IMAP (FASE 3)
+Servidor IMAP4rev1 (login, listar/select carpetas, listar y obtener mensajes, flags, mover, eliminar):
+
+```bash
+export Imap__Enabled=1          # 0 lo apaga (puerto 143 por defecto)
+export Imap__Port=143
+export Imap__Hostname='mail.midominio.com'
+export Imap__MaxMessageBytes=52428800
+```
+
+Clientes: host `mail.midominio.com`, puerto 143, IMAP normal (sin autenticación SSL aún; se puede añadir
+STARTTLS/IMAPS en una fase posterior). Autenticación con el **password del buzón** (mismo que SMTP AUTH).
+
+## 7. Ejecutar
+```bash
+# Web (admin + webmail) — arranca también SMTP / IMAP (si enabled) y el worker de cola
 dotnet run --project src/AtlasMail.Web -c Release
 
 # Worker independiente (opcional si se quiere proceso separado)
@@ -61,7 +91,7 @@ dotnet run --project src/AtlasMail.Worker -c Release
 La Web levanta internamente el DeliveryWorker (cola). Para producción puede ejecutarse el Worker
 como proceso aparte apuntando a la misma DB/message-store.
 
-## 6. Verificación de humo
+## 8. Verificación de humo
 - `GET /health` → 200.
 - `GET /Account/Login` → 200 HTML.
 - Login del admin → redirect a `/Admin` (dashboard).
