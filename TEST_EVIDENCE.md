@@ -1,8 +1,60 @@
-# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 + FASE 3 + FASE 4 + FASE 5)
+# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 + FASE 3 + FASE 4 + FASE 5 + FASE 6)
 
-Fecha FASE 5: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
+Fecha FASE 6: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
 
-## FASE 5 — Definition of Done
+## FASE 6 — Definition of Done
+
+| Requisito FASE 6 (spec §14-16) | Resultado | Evidencia |
+|---|---|---|
+| `dotnet build -c Release` → 0 errores | ✅ | `0 Advertencias / 0 Errores` |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **115/115** + Integration **18/18** = **133/133** |
+| Calendario (eventos + attendees + RRULE + all-day) | ✅ | `CalendarService` CRUD; tests create/update/delete/rango |
+| Export/import `.ics` (RFC 5545) | ✅ | Roundtrip: export→import; idempotente por UID; DTSTART/SUMMARY correctos |
+| No afirmar Exchange/Outlook completa | ✅ | Documentado §15; sólo interoperabilidad `.ics` básica |
+| Contactos personales/dominio + listas | ✅ | `ContactService` con OwnerMailboxId/DomainId |
+| Import/export VCARD (RFC 6350) / CSV | ✅ | Roundtrip VCARD; CSV con campos entre comas |
+| Listas de distribución (ventas@ → ana,juan) | ✅ | `GroupService` creada y expandida a miembros |
+| Políticas de lista (envío, moderación, límite) | ✅ | `SendPolicy`/`ModerationEnabled`/`MaxMembers` |
+| Prevención de loops en expansión | ✅ | Test con ciclo ventas↔devs: termina, sin duplicación |
+| Integración SMTP de listas locales | ✅ | RCPT acepta lista; ingesta expande a buzones locales (audit `Smtp.List`) |
+| Migración EF | ✅ | `CalendarContactsGroups` (Calendars, CalendarEvents, Attendees, DistributionLists, Members, Contact.OwnerMailboxId) |
+
+## Ejecuciones reales FASE 6
+
+### Build / Tests
+```
+Compilación correcta.  0 Advertencia(s)  0 Errores
+AtlasMail.UnitTests.dll:  Correctas!  115/115 (0 error)
+AtlasMail.IntegrationTests.dll: Correctas!  18/18 (0 error)
+```
+
+### Tests relevantes (unit)
+```
+Calendario: create/list/delete · .ics export contiene BEGIN:VCALENDAR/SUMMARY/DTSTART:20261001T090000Z ·
+            import idempotente por UID · filtro por rango de fechas
+Contactos: CRUD personal · VCARD export/import roundtrip · CSV con campo comilla/comas
+Grupos:    crear+expandir a miembros · loop ventas↔devs se previene (≤3, sin duplicados) ·
+           dirección en uso por buzón se rechaza · política external+moderación+límite
+```
+
+### Smoke real (admin, MySQL vivo)
+```
+POST /api/admin/domain corp6.mx                    -> {id:1}
+POST /domain/1/groups {name:"Ventas",localPart:"ventas",...} -> {email:"ventas@corp6.mx",...}
+POST /domain/1/groups/{id}/members {address:"ana@corp6.mx"}
+POST /domain/1/groups/{id}/members {address:"juan@corp6.mx"}
+GET  /api/admin/groups/expand/ventas/corp6.mx      -> ["ana@corp6.mx","juan@corp6.mx"]
+GET  /domain/1/groups                              -> [ventas] (1)
+```
+
+### Nota de honestidad (FASE 6)
+- `CalendarService` Export/import maneja `VEVENT` básico (no se afirman capacidades Exchange/Outlook
+  completas §15); recurrence se almacena como RRULE y se exporta tal cual (no se calculan ocurrencias).
+- La entrega SMTP de una lista expande a miembros con **buzón local** (copias en la ingesta);
+  los miembros sin buzón local se cuentan como "skipped" en el audit (acorde a servidor local; envío
+  externo desde una lista es EXTERNAL para una fase posterior).
+
+## FASE 5 — Definition of Done (para referencia)
 
 | Requisito FASE 5 (spec §20-22) | Resultado | Evidencia |
 |---|---|---|

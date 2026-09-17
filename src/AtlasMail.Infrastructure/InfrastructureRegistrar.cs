@@ -92,6 +92,10 @@ public static class InfrastructureRegistrar
         services.AddScoped<DkimOutboundSigner>();
         // FASE 5: cuarentena administrable + blocklist de remitentes
         services.AddScoped<IQuarantineService, QuarantineService>();
+        // FASE 6: calendario, contactos, grupos/listas
+        services.AddScoped<ICalendarService, CalendarService>();
+        services.AddScoped<IContactService, ContactService>();
+        services.AddScoped<IGroupService, GroupService>();
         services.AddScoped<IBackupService>(sp => new BackupService(
             sp.GetRequiredService<AtlasMailDbContext>(),
             sp.GetRequiredService<IMessageStore>(),

@@ -6,6 +6,7 @@ Servidor empresarial de correo y colaboración self-hosted. Multi-dominio.
 **FASE 3**: IMAP4rev1 y clientes externos (servidor IMAP desacoplado del almacenamiento, migración `ImapDeletedFlag`).
 **FASE 4**: autenticación de correo SPF/DKIM/DMARC (recepción + firma DKIM en salida + admin DNS).
 **FASE 5**: antispam/quarantine/antimalware (scanner heurístico real, cuarentena administrable, blocklist).
+**FASE 6**: calendar/contacts/groups (calendario .ics, contactos VCARD/CSV, listas de distribución con políticas y anti-loop).
 
 ## Stack
 - ASP.NET Core 8 (MVC + Razor + JS `fetch()`), Bootstrap local (sin CDN).
@@ -71,6 +72,18 @@ Web → Infrastructure+Application+Protocols+Security+Worker.
   `POST /quarantine/{id}/release`, `DELETE /quarantine/{id}`, `POST /quarantine/block`,
   `GET /quarantine/blocked`, `DELETE /quarantine/blocked/{id}`.
 - Migración EF `QuarantineBlockSenders` (tabla `BlockedSenders` + campos de cuarentena).
+
+## Colaboración: calendario / contactos / grupos (spec §14-16) — FASE 6
+- `Application/Services/CalendarService.cs`: eventos por buzón; export/import `.ics` (RFC 5545), idempotente
+  por ExternalUid. `ContactService.cs`: contactos personales/dominio; VCARD (RFC 6350) y CSV.
+  `GroupService.cs`: listas de distribución con políticas y expansión anti-loop.
+- Entidades: `Calendar`, `CalendarEvent`, `CalendarEventAttendee`, `DistributionList`, `DistributionListMember`;
+  `Contact.OwnerMailboxId` para listas personales.
+- Integración SMTP: la dirección que es una lista local se acepta en el RCPT y se expande en la ingesta,
+  entregando copia a cada miembro con buzón local (audit `Smtp.List`).
+- Endpoints: webmail `/api/personal/calendar[*]` y `/api/personal/contacts[*]` (aislados por mailboxId);
+  admin `/api/admin/domain/{id}/groups[*]` y `/api/admin/groups/expand/...`.
+- Migración EF `CalendarContactsGroups`.
 
 ## Persistencia y almacenamiento de mensajes (spec §1)
 - **No** se guarda MIME completo en MySQL.

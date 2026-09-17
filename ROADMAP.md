@@ -3,8 +3,9 @@
 Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 1.md),
 **FASE 2 completada** (SMTP robusto + entrega externa),
 **FASE 3 completada** (IMAP y clientes externos),
-**FASE 4 completada** (SPF/DKIM/DMARC) y
-**FASE 5 completada** (antispam/quarantine/antimalware).
+**FASE 4 completada** (SPF/DKIM/DMARC),
+**FASE 5 completada** (antispam/quarantine/antimalware) y
+**FASE 6 completada** (calendar/contacts/groups).
 
 ## CICLO 1 — COMPLETADO ✅
 - Arquitectura modular (`src/*` + `tests/*`, .NET 8, MySQL/Pomelo).
@@ -86,8 +87,25 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 - Tests: **unit 105/105** (+11: scanner heurístico electrizado, doble-ext, macro VBA, Unknown≠Clean,
   zip con exe, quarantine liberar/eliminar/bloquear-domain) e **integration 18/18** (+1: endpoints de cuarentena).
 
-## FASE 6 — Calendar / contacts / groups
-- Calendario (día/semana/mes, `.ics`), contactos (VCARD/CSV), listas de distribución y grupos con políticas.
+## FASE 6 — Calendar / contacts / groups ✅
+- **Calendario (§15)**: `CalendarService` — eventos por buzón (title, description, location, start/end,
+  timezone IANA, organizer, attendee + PARTSTAT, status, recurrencia RRULE, all-day, ExternalUid).
+  Export/import **`.ics` (RFC 5545)** idempotente por UID. No afirma compatibilidad Exchange/Outlook
+  completa (§15).
+- **Contactos (§14)**: `ContactService` — contactos personales (OwnerMailboxId) y de dominio (DomainId),
+  listas personales. Import/export **VCARD (RFC 6350)** y **CSV**.
+- **Grupos / listas (§16)**: `DistributionList(Member)` — `ventas@empresa.mx → ana@, juan@, maria@`.
+  Políticas: quién puede enviar (InternalOnly/ExternalAllowed), moderación opcional, límite de miembros.
+  **Prevención de loops** en la expansión (profundidad máx 8 + detección de ciclos + dedupe).
+- **Integración SMTP**: una dirección que es lista de distribución local se acepta como destinatario
+  y se expande en la ingesta entregando copia a cada miembro con buzón local (`Smtp.List` audit).
+- **Endpoints**: webmail `GET/POST/PUT/DELETE /api/personal/calendar[...]`, `.../contacts[...]`,
+  export/import .ics/.vcf/.csv; admin `GET/POST/PUT/DELETE /api/admin/domain/{id}/groups[...]`,
+  `GET /api/admin/groups/expand/{localPart}/{domain}`.
+- Migración EF `CalendarContactsGroups` (Calendars, CalendarEvents, CalendarEventAttendees,
+  DistributionLists, DistributionListMembers, Contact.OwnerMailboxId).
+- Tests: **unit 115/115** (+10: calendario CRUD/.ics roundtrip/rango, contactos CRUD/VCARD/CSV,
+  grupos/expansión/loops/collisión) e **integration 18/18** (sin cambios, no rompe).
 
 ## FASE 7 — Alta disponibilidad / replicación / observabilidad avanzada
 - Múltiples workers, reaprovechamiento de lease, replicación de message store, métricas/paneles.

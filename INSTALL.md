@@ -98,7 +98,21 @@ Registros a publicar en tu DNS:
   - `GET /api/admin/quarantine/blocked` / `DELETE /api/admin/quarantine/blocked/{id}` — gestionar blocklist
 - El remitente bloqueado se rechaza ya en la recepción (antes de persistir).
 
-## 8. IMAP (FASE 3)
+## 8. Calendario / contactos / grupos (FASE 6)
+Colaboración por webmail, con interoperabilidad estándar:
+- **Calendario**: `GET/POST/PUT/DELETE /api/personal/calendar[...]`,
+  `GET /api/personal/calendar/export.ics`, `POST /api/personal/calendar/import.ics`.
+  Import/export `.ics` (RFC 5545) idempotente.
+- **Contactos**: `GET/POST/PUT/DELETE /api/personal/contacts[...]`,
+  `GET /api/personal/contacts/export.vcf|.csv`, `POST /api/personal/contacts/import.vcf|.csv`.
+- **Listas de distribución** (admin): `ventas@empresa.mx → ana@, juan@, maria@`.
+  - `GET/POST/PUT/DELETE /api/admin/domain/{id}/groups[...]`
+  - `GET /api/admin/groups/expand/{localPart}/{domain}`
+  - Desde el SMTP, una lista local se acepta como destinatario y se expande en la ingesta
+    entregando una copia a cada miembro con buzón local.
+  - Políticas: envío interno/externo, moderación opcional, límite de miembros; anti-loop en la expansión.
+
+## 9. IMAP (FASE 3)
 Servidor IMAP4rev1 (login, listar/select carpetas, listar y obtener mensajes, flags, mover, eliminar):
 
 ```bash
@@ -111,7 +125,7 @@ export Imap__MaxMessageBytes=52428800
 Clientes: host `mail.midominio.com`, puerto 143, IMAP normal (sin autenticación SSL aún; se puede añadir
 STARTTLS/IMAPS en una fase posterior). Autenticación con el **password del buzón** (mismo que SMTP AUTH).
 
-## 9. Ejecutar
+## 10. Ejecutar
 ```bash
 # Web (admin + webmail) — arranca también SMTP / IMAP (si enabled) y el worker de cola
 dotnet run --project src/AtlasMail.Web -c Release
@@ -123,7 +137,7 @@ dotnet run --project src/AtlasMail.Worker -c Release
 La Web levanta internamente el DeliveryWorker (cola). Para producción puede ejecutarse el Worker
 como proceso aparte apuntando a la misma DB/message-store.
 
-## 10. Verificación de humo
+## 11. Verificación de humo
 - `GET /health` → 200.
 - `GET /Account/Login` → 200 HTML.
 - Login del admin → redirect a `/Admin` (dashboard).

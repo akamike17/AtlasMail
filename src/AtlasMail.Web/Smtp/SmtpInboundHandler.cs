@@ -1,5 +1,6 @@
 using AtlasMail.Application;
 using AtlasMail.Application.Abstractions;
+using AtlasMail.Application.Services;
 using AtlasMail.Domain.Entities;
 using AtlasMail.Domain.Enums;
 using AtlasMail.Domain.Rules;
@@ -22,12 +23,13 @@ public class SmtpInboundHandler : ISmtpMessageHandler
     private readonly IInboundDeliveryService _inbound;
     private readonly IApplicationDbContext _db;
     private readonly IPasswordHasher _hasher;
+    private readonly IGroupService? _groups;
     private readonly ILogger<SmtpInboundHandler> _logger;
 
     public SmtpInboundHandler(IAddressResolutionService resolver, IInboundDeliveryService inbound,
-        IApplicationDbContext db, IPasswordHasher hasher, ILogger<SmtpInboundHandler> logger)
+        IApplicationDbContext db, IPasswordHasher hasher, IGroupService? groups, ILogger<SmtpInboundHandler> logger)
     {
-        _resolver = resolver; _inbound = inbound; _db = db; _hasher = hasher; _logger = logger;
+        _resolver = resolver; _inbound = inbound; _db = db; _hasher = hasher; _groups = groups; _logger = logger;
     }
 
     public async Task<string> AuthenticateAsync(string username, string password, SmtpSessionContext ctx, CancellationToken ct = default)
@@ -85,6 +87,10 @@ public class SmtpInboundHandler : ISmtpMessageHandler
         var resolved = await _resolver.ResolveAsync(rcptTo, ct);
         bool domainLocal = resolved.Found || await _resolver.IsDomainLocalAsync(rcptAddr.Domain, ct);
 
+        // FASE 6: una lista de distribución local es destinatario local válido
+        bool isLocalList = !resolved.Found && _groups != null && await _groups.IsDistributionAsync(rcptTo, ct);
+        bool rcptExistsLocally = resolved.Found || isLocalList;
+
         // Configuración de la política
         bool allowAuthSend = await SendConfig(ct);
 
@@ -95,7 +101,7 @@ public class SmtpInboundHandler : ISmtpMessageHandler
             rcptTo: rcptAddr,
             authenticated: ctx.Authenticated,
             domainIsLocal: domainLocal,
-            rcptExistsLocally: resolved.Found,
+            rcptExistsLocally: rcptExistsLocally,
             allowAuthSend: allowAuthSend);
 
         return decision.Decision switch

@@ -228,6 +228,9 @@ public class Contact
     public long Id { get; set; }
     public long? DomainId { get; set; }
     public Domain? Domain { get; set; }
+    /// <summary>Buzón dueño (contacto personal) si no es de dominio.</summary>
+    public long? OwnerMailboxId { get; set; }
+    public Mailbox? OwnerMailbox { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;
     public string? Phone { get; set; }
@@ -256,4 +259,109 @@ public class BlockedSender
     public string? Reason { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public string? CreatedBy { get; set; }
+}
+
+/// <summary>Calendario de un buzón (FASE 6, spec §15).</summary>
+public class Calendar
+{
+    public long Id { get; set; }
+    public long MailboxId { get; set; }
+    public Mailbox? Mailbox { get; set; }
+    public string Name { get; set; } = "Mi calendario";
+    public string Color { get; set; } = "#2962ff";
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    [JsonIgnore] public ICollection<CalendarEvent> Events { get; } = new List<CalendarEvent>();
+}
+
+/// <summary>Estado de un evento (RFC 5545 STATUS).</summary>
+public enum CalendarEventDisplayStatus
+{
+    Confirmed = 0,
+    Tentative = 1,
+    Cancelled = 2
+}
+
+/// <summary>Estado de asistencia de un attendee (RFC 5545 PARTSTAT).</summary>
+public enum AttendeeParticipationStatus
+{
+    NeedsAction = 0,
+    Accepted = 1,
+    Declined = 2,
+    Tentative = 3
+}
+
+/// <summary>Evento de calendario (FASE 6, spec §15).</summary>
+public class CalendarEvent
+{
+    public long Id { get; set; }
+    public long CalendarId { get; set; }
+    public Calendar? Calendar { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string? Description { get; set; }
+    public string? Location { get; set; }
+    public DateTime StartUtc { get; set; }
+    public DateTime EndUtc { get; set; }
+    /// <summary>IANA timezone, ej. "America/Mexico_City". </summary>
+    public string TimeZoneId { get; set; } = "UTC";
+    public string? OrganizerEmail { get; set; }
+    /// <summary>Regla RRULE de recurrencia (ej. "FREQ=WEEKLY;BYDAY=MO") o null si no recurre.</summary>
+    public string? RecurrenceRule { get; set; }
+    public CalendarEventDisplayStatus Status { get; set; } = CalendarEventDisplayStatus.Confirmed;
+    public bool IsAllDay { get; set; }
+    /// <summary>Si proviene de un .ics externo, su UID original (para idempotencia de import).</summary>
+    public string? ExternalUid { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
+    [JsonIgnore] public ICollection<CalendarEventAttendee> Attendees { get; } = new List<CalendarEventAttendee>();
+}
+
+/// <summary>Attendee de un evento (FASE 6).</summary>
+public class CalendarEventAttendee
+{
+    public long Id { get; set; }
+    public long CalendarEventId { get; set; }
+    public CalendarEvent? CalendarEvent { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string? DisplayName { get; set; }
+    public AttendeeParticipationStatus ParticipationStatus { get; set; } = AttendeeParticipationStatus.NeedsAction;
+}
+
+/// <summary>Cómo se aplica una política de envío a una lista de distribución (FASE 6, spec §16).</summary>
+public enum DistributionSendPolicy
+{
+    /// <summary>Quien tiene un buzón local en el servidor puede enviar.</summary>
+    InternalOnly = 0,
+    /// <summary>Cualquiera puede enviar (pero aún sujeto a moderación si está activa).</summary>
+    ExternalAllowed = 1
+}
+
+/// <summary>Lista de distribución (ventas@empresa.mx → ana@, juan@, maria@), spec §16.</summary>
+public class DistributionList
+{
+    public long Id { get; set; }
+    public long DomainId { get; set; }
+    public Domain? Domain { get; set; }
+    public string Name { get; set; } = string.Empty;
+    /// <summary>Local part de la dirección de la lista.</summary>
+    public string LocalPart { get; set; } = string.Empty;
+    public string? Description { get; set; }
+    public bool Enabled { get; set; } = true;
+    public DistributionSendPolicy SendPolicy { get; set; } = DistributionSendPolicy.InternalOnly;
+    /// <summary>Si true, un admin/SecurityAdmin debe aprobar antes de que se distribuya.</summary>
+    public bool ModerationEnabled { get; set; }
+    /// <summary>Límite de destinatarios expandidos por mensaje; 0 = sin límite explícito.</summary>
+    public int MaxMembers { get; set; } = 0;
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    [JsonIgnore] public ICollection<DistributionListMember> Members { get; } = new List<DistributionListMember>();
+}
+
+/// <summary>Miembro de una lista de distribución (spec §16).</summary>
+public class DistributionListMember
+{
+    public long Id { get; set; }
+    public long DistributionListId { get; set; }
+    public DistributionList? DistributionList { get; set; }
+    public string AddressOrLocalPart { get; set; } = string.Empty;
+    public string? DisplayName { get; set; }
+    public DateTime AddedAtUtc { get; set; } = DateTime.UtcNow;
 }

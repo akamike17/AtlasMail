@@ -1,6 +1,7 @@
 using AtlasMail.Application;
 using AtlasMail.Application.Abstractions;
 using AtlasMail.Application.Dtos;
+using AtlasMail.Application.Services;
 using AtlasMail.Domain.Enums;
 using AtlasMail.Web.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -26,12 +27,13 @@ public class AdminApiController : ControllerBase
     private readonly IBackupService _backup;
     private readonly IDomainMailAuthService _mailAuth;
     private readonly IQuarantineService _quarantine;
+    private readonly IGroupService _groups;
     private readonly ICurrentUser _current;
 
     public AdminApiController(IAdminService admin, IAdminDashboardService dashboard, IOutboundQueueService queue,
-        IMessageTraceService trace, IAuditService audit, IBackupService backup, IDomainMailAuthService mailAuth, IQuarantineService quarantine, ICurrentUser current)
+        IMessageTraceService trace, IAuditService audit, IBackupService backup, IDomainMailAuthService mailAuth, IQuarantineService quarantine, IGroupService groups, ICurrentUser current)
     {
-        _admin = admin; _dashboard = dashboard; _queue = queue; _trace = trace; _audit = audit; _backup = backup; _mailAuth = mailAuth; _quarantine = quarantine; _current = current;
+        _admin = admin; _dashboard = dashboard; _queue = queue; _trace = trace; _audit = audit; _backup = backup; _mailAuth = mailAuth; _quarantine = quarantine; _groups = groups; _current = current;
     }
 
     [HttpGet("dashboard")]
@@ -198,6 +200,56 @@ public class AdminApiController : ControllerBase
     [Authorize(Roles = "SuperAdmin,SecurityAdmin")]
     public async Task<IActionResult> UnblockSender(long id)
         => (await _quarantine.UnblockAsync(id)) ? Ok(new { unblocked = true }) : NotFound(new { error = "No existe" });
+
+    // ---------- Grupos / listas de distribución (FASE 6, spec §16) ----------
+
+    [HttpGet("domain/{domainId:long}/groups")]
+    [Authorize(Roles = "SuperAdmin,DomainAdmin")]
+    public async Task<IActionResult> GroupList(long domainId) => Ok(await _groups.ListAsync(domainId));
+
+    [HttpPost("domain/{domainId:long}/groups")]
+    [Authorize(Roles = "SuperAdmin,DomainAdmin")]
+    public async Task<IActionResult> GroupCreate(long domainId, [FromBody] GroupInputExt input)
+    {
+        try { return Ok(await _groups.CreateAsync(domainId, new GroupInput(input!.Name, input.LocalPart, input.Description, input.Enabled, input.SendPolicy ?? "internal", input.ModerationEnabled, input.MaxMembers))); }
+        catch (ArgumentException ex) { return BadRequest(new { error = ex.Message }); }
+        catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
+    }
+
+    [HttpPut("domain/{domainId:long}/groups/{id:long}")]
+    [Authorize(Roles = "SuperAdmin,DomainAdmin")]
+    public async Task<IActionResult> GroupUpdate(long domainId, long id, [FromBody] GroupInputExt input)
+    {
+        try { return Ok(await _groups.UpdateAsync(domainId, id, new GroupInput(input!.Name, input.LocalPart, input.Description, input.Enabled, input.SendPolicy ?? "internal", input.ModerationEnabled, input.MaxMembers))); }
+        catch (ArgumentException ex) { return BadRequest(new { error = ex.Message }); }
+        catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
+    }
+
+    [HttpDelete("domain/{domainId:long}/groups/{id:long}")]
+    [Authorize(Roles = "SuperAdmin,DomainAdmin")]
+    public async Task<IActionResult> GroupDelete(long domainId, long id)
+        => (await _groups.DeleteAsync(domainId, id)) ? Ok(new { ok = true }) : NotFound(new { error = "No existe" });
+
+    [HttpPost("domain/{domainId:long}/groups/{id:long}/members")]
+    [Authorize(Roles = "SuperAdmin,DomainAdmin")]
+    public async Task<IActionResult> GroupAddMember(long domainId, long id, [FromBody] GroupMemberInputExt m)
+        => (await _groups.AddMemberAsync(domainId, id, m?.Address ?? "", m?.DisplayName)) ? Ok(new { ok = true }) : BadRequest(new { error = "Miembro inválido o ya existe" });
+
+    [HttpDelete("domain/{domainId:long}/groups/members/{memberId:long}")]
+    [Authorize(Roles = "SuperAdmin,DomainAdmin")]
+    public async Task<IActionResult> GroupRemoveMember(long domainId, long memberId)
+        => (await _groups.RemoveMemberAsync(domainId, memberId)) ? Ok(new { ok = true }) : NotFound(new { error = "No existe" });
+
+    [HttpGet("groups/expand/{localPart}/{domainName}")]
+    [Authorize(Roles = "SuperAdmin,DomainAdmin")]
+    public async Task<IActionResult> GroupExpand(string localPart, string domainName)
+    {
+        try { return Ok(new { members = await _groups.ExpandAsync($"{localPart}@{domainName}") }); }
+        catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
+    }
 }
+
+public sealed record GroupInputExt(string? Name, string LocalPart, string? Description, bool Enabled, string? SendPolicy, bool ModerationEnabled, int MaxMembers);
+public sealed record GroupMemberInputExt(string? Address, string? DisplayName);
 
 public sealed record BlockSenderRequest(string? Value, string? Kind, string? Reason);

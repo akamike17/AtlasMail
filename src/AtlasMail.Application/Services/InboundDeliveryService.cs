@@ -26,22 +26,23 @@ public class InboundDeliveryService : IInboundDeliveryService
         private readonly IAuditService _audit;
         private readonly IEmailAuthenticationService? _emailAuth;
         private readonly IQuarantineService? _quarantine;
+        private readonly IGroupService? _groups;
         private readonly ILogger<InboundDeliveryService> _logger;
 
         public InboundDeliveryService(IApplicationDbContext db, IMessageStore store,
             IRuleEngine rules, IAttachmentScanner scanner, IAddressResolutionService resolver,
             IAuditService audit, IEmailAuthenticationService? emailAuth, IQuarantineService? quarantine,
-            ILogger<InboundDeliveryService> logger)
+            IGroupService? groups, ILogger<InboundDeliveryService> logger)
         {
             _db = db; _store = store; _rules = rules;
-            _scanner = scanner; _resolver = resolver; _audit = audit; _emailAuth = emailAuth; _quarantine = quarantine; _logger = logger;
+            _scanner = scanner; _resolver = resolver; _audit = audit; _emailAuth = emailAuth; _quarantine = quarantine; _groups = groups; _logger = logger;
         }
 
         // Constructor legacy para tests que no dependen de auth de correo/cuarentena
         public InboundDeliveryService(IApplicationDbContext db, IMessageStore store,
             IRuleEngine rules, IAttachmentScanner scanner, IAddressResolutionService resolver,
             IAuditService audit, ILogger<InboundDeliveryService> logger)
-            : this(db, store, rules, scanner, resolver, audit, emailAuth: null, quarantine: null, logger) { }
+            : this(db, store, rules, scanner, resolver, audit, emailAuth: null, quarantine: null, groups: null, logger) { }
 
     public async Task<InboundResult> IngestAsync(string envelopeFrom, string envelopeTo, byte[] rawMime,
         string? helo, string? clientIp, bool authenticated, string actor, CancellationToken ct = default)
@@ -54,6 +55,34 @@ public class InboundDeliveryService : IInboundDeliveryService
         bool domainLocal = resolved.Found || await _resolver.IsDomainLocalAsync(rcpt.Domain, ct);
         if (!domainLocal)
             return await Reject(envelopeFrom, envelopeTo, "relay_denied", actor, clientIp, ct);
+
+        // FASE 6: lista de distribución local → entregar a cada miembro local
+        if (!resolved.Found && _groups != null)
+        {
+            bool isDistribution = await _groups.IsDistributionAsync(rcpt.Full, ct);
+            if (isDistribution)
+            {
+                var expanded = await _groups.ExpandAsync(rcpt.Full, ct);
+                if (expanded.Count == 0)
+                    return await Reject(envelopeFrom, envelopeTo, "list_empty", actor, clientIp, ct);
+                int deliveredLocal = 0, skipped = 0;
+                foreach (var member in expanded)
+                {
+                    var memberResolved = await _resolver.ResolveAsync(member, ct);
+                    if (memberResolved.Found && memberResolved.MailboxId.HasValue)
+                    {
+                        var sub = await IngestAsync(envelopeFrom, member, rawMime, helo, clientIp, authenticated, actor, ct);
+                        if (sub != InboundResult.RelayDenied && sub != InboundResult.Rejected) deliveredLocal++;
+                    }
+                    else skipped++;
+                }
+                await _audit.RecordAsync("Smtp.List", actor, null, clientIp, "message", envelopeTo, "OK",
+                    $"list={rcpt.Full} local_delivered={deliveredLocal} skipped={skipped}", ct);
+                _logger.LogInformation("Lista {List}: {D} locales entregados, {S} omitidos", rcpt.Full, deliveredLocal, skipped);
+                return deliveredLocal > 0 ? InboundResult.Accepted : InboundResult.Rejected;
+            }
+        }
+
         if (!resolved.Found)
             return await Reject(envelopeFrom, envelopeTo, "recipient_not_found", actor, clientIp, ct);
 

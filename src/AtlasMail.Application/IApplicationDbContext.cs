@@ -26,6 +26,11 @@ public interface IApplicationDbContext
     DbSet<Contact> Contacts { get; }
     DbSet<ConfigurationEntry> ConfigurationEntries { get; }
     DbSet<BlockedSender> BlockedSenders { get; }
+    DbSet<Calendar> Calendars { get; }
+    DbSet<CalendarEvent> CalendarEvents { get; }
+    DbSet<CalendarEventAttendee> CalendarEventAttendees { get; }
+    DbSet<DistributionList> DistributionLists { get; }
+    DbSet<DistributionListMember> DistributionListMembers { get; }
 
     DatabaseFacade Database { get; }
     Task<int> SaveChangesAsync(CancellationToken ct = default);

@@ -123,6 +123,31 @@ Evaluación en recepción y firma en salida. Resultados auditables vía metadata
 - `POST /api/admin/domain/{id}/auth/dkim/enable` — genera clave DKIM + registro TXT del selector.
 - `POST /api/admin/domain/{id}/auth/dmarc` — body: `"none"|"quarantine"|"reject"`.
 
+## Calendario / contactos / grupos (spec §14-16) — FASE 6
+Colaboración por buzón/webmail, con interoperabilidad estándar.
+
+### Calendario (§15) — RFC 5545
+- Eventos: title, description, location, start/end (UTC), timezone IANA, organizer, attendees (PARTSTAT),
+  status (confirmed/tentative/cancelled), recurrencia RRULE, all-day, ExternalUid (import).
+- Export/import `.ics`: `BEGIN:VCALENDAR` con `VEVENT`, fold de líneas, escape de `;,`: \\
+  Import idempotente por UID. No se afirma compatibilidad Exchange/Outlook completa (§15).
+- Webmail: `GET/POST/PUT/DELETE /api/personal/calendar[...]`,
+  `GET /api/personal/calendar/export.ics`, `POST /api/personal/calendar/import.ics`.
+
+### Contactos (§14) — VCARD (RFC 6350) y CSV
+- Personal (OwnerMailboxId) o de dominio (DomainId); listas personales.
+- `VCARD` (FN/EMAIL/TEL/ORG/NOTE) y `CSV` (Name,Email,Phone,Company,Notes).
+- Webmail: `GET/POST/PUT/DELETE /api/personal/contacts[...]`,
+  `GET /api/personal/contacts/export.vcf|.csv`, `POST /api/personal/contacts/import.vcf|.csv`.
+
+### Grupos / listas de distribución (§16)
+- `DistributionList` + `DistributionListMember`: `ventas@empresa.mx → ana@, juan@, maria@`.
+- Políticas: InternalOnly (solo buzones locales) / ExternalAllowed, moderación opcional, MaxMembers.
+- Expansión anti-loop: profundidad máx 8, detección de ciclos y dedupe.
+- Admin: `GET/POST/PUT/DELETE /api/admin/domain/{id}/groups[...]`,
+  `GET /api/admin/groups/expand/{localPart}/{domain}`.
+- SMTP: la lista local se acepta como destinatario y en la ingesta se expande a cada miembro local (audit `Smtp.List`).
+
 ## IMAP / Webmail / Búsqueda
 - IMAP: FASE 3 (arriba).
 - Webmail: RFC-compatible a nivel de metadatos vía API interna (no protocolo wire).
