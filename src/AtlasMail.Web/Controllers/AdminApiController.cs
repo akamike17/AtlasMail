@@ -25,12 +25,13 @@ public class AdminApiController : ControllerBase
     private readonly IAuditService _audit;
     private readonly IBackupService _backup;
     private readonly IDomainMailAuthService _mailAuth;
+    private readonly IQuarantineService _quarantine;
     private readonly ICurrentUser _current;
 
     public AdminApiController(IAdminService admin, IAdminDashboardService dashboard, IOutboundQueueService queue,
-        IMessageTraceService trace, IAuditService audit, IBackupService backup, IDomainMailAuthService mailAuth, ICurrentUser current)
+        IMessageTraceService trace, IAuditService audit, IBackupService backup, IDomainMailAuthService mailAuth, IQuarantineService quarantine, ICurrentUser current)
     {
-        _admin = admin; _dashboard = dashboard; _queue = queue; _trace = trace; _audit = audit; _backup = backup; _mailAuth = mailAuth; _current = current;
+        _admin = admin; _dashboard = dashboard; _queue = queue; _trace = trace; _audit = audit; _backup = backup; _mailAuth = mailAuth; _quarantine = quarantine; _current = current;
     }
 
     [HttpGet("dashboard")]
@@ -154,4 +155,49 @@ public class AdminApiController : ControllerBase
         catch (ArgumentException ex) { return BadRequest(new { error = ex.Message }); }
         catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
     }
+
+    // ---------- Quarantine / blocklist (FASE 5, spec §22) ----------
+
+    [HttpGet("quarantine")]
+    [Authorize(Roles = "SuperAdmin,SecurityAdmin")]
+    public async Task<IActionResult> QuarantineList(int skip = 0, int take = 50, long? mailboxId = null)
+        => Ok(await _quarantine.ListAsync(skip, take, mailboxId));
+
+    [HttpGet("quarantine/{id:long}")]
+    [Authorize(Roles = "SuperAdmin,SecurityAdmin")]
+    public async Task<IActionResult> QuarantineInspect(long id)
+    {
+        var item = await _quarantine.InspectAsync(id);
+        return item == null ? NotFound(new { error = "No existe o no está en cuarentena" }) : Ok(item);
+    }
+
+    [HttpPost("quarantine/{id:long}/release")]
+    [Authorize(Roles = "SuperAdmin,SecurityAdmin")]
+    public async Task<IActionResult> QuarantineRelease(long id)
+        => (await _quarantine.ReleaseAsync(id)) ? Ok(new { ok = true }) : NotFound(new { error = "No existe o no está en cuarentena" });
+
+    [HttpDelete("quarantine/{id:long}")]
+    [Authorize(Roles = "SuperAdmin,SecurityAdmin")]
+    public async Task<IActionResult> QuarantineDelete(long id)
+        => (await _quarantine.DeleteAsync(id)) ? Ok(new { ok = true }) : NotFound(new { error = "No existe o no está en cuarentena" });
+
+    [HttpPost("quarantine/block")]
+    [Authorize(Roles = "SuperAdmin,SecurityAdmin")]
+    public async Task<IActionResult> BlockSender([FromBody] BlockSenderRequest req)
+    {
+        var kind = req?.Kind?.Equals("domain", StringComparison.OrdinalIgnoreCase) == true ? SenderMatchKind.Domain : SenderMatchKind.Exact;
+        var ok = await _quarantine.BlockSenderAsync(req?.Value ?? "", kind, req?.Reason, _current.Username, CancellationToken.None);
+        return ok ? Ok(new { blocked = true }) : BadRequest(new { error = "Dirección inválida, ya bloqueada o datos incompletos" });
+    }
+
+    [HttpGet("quarantine/blocked")]
+    [Authorize(Roles = "SuperAdmin,SecurityAdmin")]
+    public async Task<IActionResult> BlockedList() => Ok(await _quarantine.ListBlockedAsync());
+
+    [HttpDelete("quarantine/blocked/{id:long}")]
+    [Authorize(Roles = "SuperAdmin,SecurityAdmin")]
+    public async Task<IActionResult> UnblockSender(long id)
+        => (await _quarantine.UnblockAsync(id)) ? Ok(new { unblocked = true }) : NotFound(new { error = "No existe" });
 }
+
+public sealed record BlockSenderRequest(string? Value, string? Kind, string? Reason);

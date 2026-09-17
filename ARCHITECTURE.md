@@ -5,6 +5,7 @@ Servidor empresarial de correo y colaboración self-hosted. Multi-dominio.
 **FASE 2**: SMTP robusto + entrega externa (MX/DNS real, STARTTLS, AUTH, bounces seguros, rate limits, observabilidad).
 **FASE 3**: IMAP4rev1 y clientes externos (servidor IMAP desacoplado del almacenamiento, migración `ImapDeletedFlag`).
 **FASE 4**: autenticación de correo SPF/DKIM/DMARC (recepción + firma DKIM en salida + admin DNS).
+**FASE 5**: antispam/quarantine/antimalware (scanner heurístico real, cuarentena administrable, blocklist).
 
 ## Stack
 - ASP.NET Core 8 (MVC + Razor + JS `fetch()`), Bootstrap local (sin CDN).
@@ -54,6 +55,22 @@ Web → Infrastructure+Application+Protocols+Security+Worker.
   política DMARC (`Delivery:DmarcEnforce`). El worker firma DKIM antes de entregar externamente.
 - Endpoints admin (SuperAdmin): `GET domain/{id}/auth`, `POST domain/{id}/auth/dkim/enable`,
   `POST domain/{id}/auth/dmarc`.
+
+## Antispam / antimalware / cuarentena (spec §20-22) — FASE 5
+- **Antimalware**: `AtlasMail.Security.Antimalware.HeuristicAttachmentScanner` (spec §21). Heurística local
+  (sin API comercial): extensiones de riesgo, double-extension, magic bytes (MZ/ELF/Mach-O/PDF/PNG), macros
+  VBA en Office-OOXML (`vbaProject.bin`), HTML ofuscado. Devuelve Clean/Suspicious/Malicious/Unknown/
+  ScannerUnavailable; **nunca Unknown→Clean**. `IAttachmentScanner` permite pluguear ClamAV u otro motor.
+- **Integración**: la ingesta escanea cada adjunto (llena `Attachment.ScanStatus`); Malicious →
+  cuarentena `malware`, Suspicious sube el score. `SpamDecision` se calcula con spam+auth+malware.
+- **Cuarentena (§22)**: `Message.IsQuarantined`/`QuarantineReason`/`QuarantinedAtUtc`.
+  `QuarantineService` (Application) — SecurityAdmin puede listar, inspeccionar (metadatos+adjuntos sin
+  MIME completo), **liberar**, **eliminar** (metadata+blob) y **bloquear remitente** (exacto o dominio).
+  La blocklist (`BlockedSender`) se comprueba en la ingesta y rechaza antes de persistir.
+- **Endpoints (SecurityAdmin/SuperAdmin)**: `GET /quarantine`, `GET /quarantine/{id}`,
+  `POST /quarantine/{id}/release`, `DELETE /quarantine/{id}`, `POST /quarantine/block`,
+  `GET /quarantine/blocked`, `DELETE /quarantine/blocked/{id}`.
+- Migración EF `QuarantineBlockSenders` (tabla `BlockedSenders` + campos de cuarentena).
 
 ## Persistencia y almacenamiento de mensajes (spec §1)
 - **No** se guarda MIME completo en MySQL.

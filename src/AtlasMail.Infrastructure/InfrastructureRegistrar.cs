@@ -6,6 +6,7 @@ using AtlasMail.Infrastructure.EmailAuth;
 using AtlasMail.Infrastructure.Imap;
 using AtlasMail.Infrastructure.Persistence;
 using AtlasMail.Infrastructure.Storage;
+using AtlasMail.Security.Antimalware;
 using DnsClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -42,7 +43,9 @@ public static class InfrastructureRegistrar
         services.AddScoped<IAuditService, AuditService>();
         services.AddScoped<IAdminDashboardService, AdminDashboardService>();
         services.AddScoped<IRuleEngine, RuleEngine>();
-        services.AddScoped<IAttachmentScanner, NoOpAttachmentScanner>();
+        // FASE 5: antimalware heurístico real local (spec §21, sin API comercial). Interfaz lista
+        // para pluguear ClamAV u otro motor detrás de IAttachmentScanner.
+        services.AddScoped<IAttachmentScanner, HeuristicAttachmentScanner>();
         services.AddSingleton<IMailIntelligenceService, DisabledMailIntelligenceService>();
 
         // FASE 2: entrega externa (DNS MX + política + rate limit)
@@ -87,6 +90,8 @@ public static class InfrastructureRegistrar
                 logger: sp.GetRequiredService<ILoggerFactory>().CreateLogger<EmailAuthenticationService>()));
         services.AddScoped<IDomainMailAuthService, DomainMailAuthService>();
         services.AddScoped<DkimOutboundSigner>();
+        // FASE 5: cuarentena administrable + blocklist de remitentes
+        services.AddScoped<IQuarantineService, QuarantineService>();
         services.AddScoped<IBackupService>(sp => new BackupService(
             sp.GetRequiredService<AtlasMailDbContext>(),
             sp.GetRequiredService<IMessageStore>(),

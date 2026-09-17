@@ -27,6 +27,7 @@ public class FakeAppDbContext : DbContext, IApplicationDbContext
     public DbSet<LoginAttempt> LoginAttempts { get; set; } = null!;
     public DbSet<Contact> Contacts { get; set; } = null!;
     public DbSet<ConfigurationEntry> ConfigurationEntries { get; set; } = null!;
+    public DbSet<BlockedSender> BlockedSenders { get; set; } = null!;
 
     public Task<int> ExecuteSqlRawAsync(string sql, CancellationToken ct = default) => Task.FromResult(0);
 

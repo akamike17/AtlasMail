@@ -1,8 +1,58 @@
-# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 + FASE 3 + FASE 4)
+# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 + FASE 3 + FASE 4 + FASE 5)
 
-Fecha FASE 4: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
+Fecha FASE 5: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
 
-## FASE 4 — Definition of Done
+## FASE 5 — Definition of Done
+
+| Requisito FASE 5 (spec §20-22) | Resultado | Evidencia |
+|---|---|---|
+| `dotnet build -c Release` → 0 errores | ✅ | `0 Advertencias / 0 Errores` |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **105/105** + Integration **18/18** = **123/123** |
+| Antimalware real (no NoOp) | ✅ | `HeuristicAttachmentScanner`: executable/vbs/doble-ext/VBA-macro/HTML-ofuscado/zip-exe |
+| Nunca Unknown como Clean | ✅ | Unit `Binario_desconocido_es_Unknown_no_Clean` |
+| Canales de antimalware (Clean/Suspicious/Malicious/Unknown/ScannerUnavailable) | ✅ | Enums + scanner con magic bytes y heurística local |
+| Integración al pipeline de ingesta | ✅ | `Attachment.ScanStatus` poblado; Malicious→quarantine; score spam+auth+malware |
+| Cuarentena: listar/inspeccionar | ✅ | `QuarantineService.List/Inspect` (metadatos sin MIME completo) |
+| Cuarentena: liberar | ✅ | `ReleaseAsync` → carpeta destino, `SpamDecision` recalculado |
+| Cuarentena: eliminar | ✅ | `DeleteAsync` borra metadata + blob del store |
+| Bloquear remitente | ✅ | `BlockSenderAsync` exacto/dominio; mata cuarentena del remitente; rechaza en ingesta |
+| Endpoints admin (SecurityAdmin/SuperAdmin) | ✅ | `/api/admin/quarantine[...]`, `/block`, `/blocked`, unblock |
+| Migración EF | ✅ | `QuarantineBlockSenders` (tabla BlockedSenders + campos Message) |
+
+## Ejecuciones reales FASE 5
+
+### Build / Tests
+```
+Compilación correcta.  0 Advertencia(s)  0 Errores
+AtlasMail.UnitTests.dll:  Correctas!  105/105 (0 error)
+AtlasMail.IntegrationTests.dll: Correctas!  18/18 (0 error)
+```
+
+### Tests relevantes (unit)
+```
+Antimalware: .exe→Malicious · .vbs→Malicious · factura.pdf.exe→Suspicious · .docm(vbaProject.bin)→Malicious ·
+             pdf/PNG reales→Clean · blob desconocido→Unknown (≠Clean) · zip(exe)→Suspicious · html ofuscado→Suspicious
+Quarantine: bloquear dominio mata cuarentena del remitente y matcha en ingesta · unblock ·
+            liberar (IsQuarantined=false, SpamDecision Allowed) · eliminar (borna metadata+blob)
+```
+
+### Smoke / API
+```
+GET  /api/admin/quarantine                    -> []
+POST /api/admin/quarantine/block {value:"spammer@baddie.net",kind:"exact"} -> {blocked:true}
+GET  /api/admin/quarantine/blocked            -> [{value:"spammer@baddie.net",...}]
+DELETE /api/admin/quarantine/blocked/{id}     -> {unblocked:true}
+GET  /api/admin/quarantine/blocked            -> []
+```
+
+### Nota de honestidad (FASE 5)
+El scanner heurístico local (sin firma ni API comercial) es intencionadamente conservador: lo no
+reconocido queda en **Unknown**, nunca Clean (§21). Un motor con firmas (ClamAV) puede pluguearse detrás
+de `IAttachmentScanner`; hasta entonces Unknown/ScannerUnavailable se tratan con riesgo por defecto. La
+exclusión de falsos positivos de determinación de malware por heurística es conservadora (no pierde correo:
+lo que marca Malicious primero se cuarentena, no se pierde).
+
+## FASE 4 — Definition of Done (para referencia)
 
 | Requisito FASE 4 (spec §17-19) | Resultado | Evidencia |
 |---|---|---|

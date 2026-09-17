@@ -121,8 +121,14 @@ public class Message
     public SpamDecision SpamDecision { get; set; } = SpamDecision.None;
     public double SpamScore { get; set; }
     public string? InReplyTo { get; set; }
-    /// <summary>Flag \Deleted de IMAP: marcado por STORE +Deleted y purgado por EXPUNGE.</summary>
+    /// <summary>Flag \\Deleted de IMAP: marcado por STORE +Deleted y purgado por EXPUNGE.</summary>
     public bool IsDeleted { get; set; }
+    /// <summary>En cuarentena (FASE 5): no visible en el buzón hasta liberarlo.</summary>
+    public bool IsQuarantined { get; set; }
+    /// <summary>Motivo de cuarentena (score, malware, DMARC, over-quota).</summary>
+    public string? QuarantineReason { get; set; }
+    /// <summary>Cuándo se puso en cuarentena.</summary>
+    public DateTime? QuarantinedAtUtc { get; set; }
 
     [JsonIgnore] public ICollection<MessageRecipient> Recipients { get; } = new List<MessageRecipient>();
     [JsonIgnore] public ICollection<Attachment> Attachments { get; } = new List<Attachment>();
@@ -237,4 +243,17 @@ public class ConfigurationEntry
     public string Key { get; set; } = string.Empty;
     public string Value { get; set; } = string.Empty;
     public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>Remitente bloqueado (FASE 5): la ingesta rechaza mensajes que coinciden.</summary>
+public class BlockedSender
+{
+    public long Id { get; set; }
+    /// <summary>Dirección completa o dominio (según MatchKind).</summary>
+    public string Value { get; set; } = string.Empty;
+    /// <summary>Exact = address; Domain = todo un dominio.</summary>
+    public SenderMatchKind MatchKind { get; set; } = SenderMatchKind.Exact;
+    public string? Reason { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public string? CreatedBy { get; set; }
 }

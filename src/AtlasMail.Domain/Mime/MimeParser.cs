@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using AtlasMail.Domain.Enums;
 
 namespace AtlasMail.Domain.Mime;
 
@@ -10,6 +11,8 @@ public sealed class AttachmentPart
     public string ContentType { get; set; } = "application/octet-stream";
     public byte[] Data { get; set; } = Array.Empty<byte>();
     public string? ContentId { get; set; }
+    /// <summary>Resultado del antimalware (FASE 5); se copia a Attachment.ScanStatus en persistencia.</summary>
+    public AttachmentScanStatus ScanStatus { get; set; } = AttachmentScanStatus.Unknown;
 }
 
 /// <summary>Resultado del parseo MIME de un mensaje.</summary>

@@ -25,21 +25,23 @@ public class InboundDeliveryService : IInboundDeliveryService
         private readonly IAddressResolutionService _resolver;
         private readonly IAuditService _audit;
         private readonly IEmailAuthenticationService? _emailAuth;
+        private readonly IQuarantineService? _quarantine;
         private readonly ILogger<InboundDeliveryService> _logger;
 
         public InboundDeliveryService(IApplicationDbContext db, IMessageStore store,
             IRuleEngine rules, IAttachmentScanner scanner, IAddressResolutionService resolver,
-            IAuditService audit, IEmailAuthenticationService? emailAuth, ILogger<InboundDeliveryService> logger)
+            IAuditService audit, IEmailAuthenticationService? emailAuth, IQuarantineService? quarantine,
+            ILogger<InboundDeliveryService> logger)
         {
             _db = db; _store = store; _rules = rules;
-            _scanner = scanner; _resolver = resolver; _audit = audit; _emailAuth = emailAuth; _logger = logger;
+            _scanner = scanner; _resolver = resolver; _audit = audit; _emailAuth = emailAuth; _quarantine = quarantine; _logger = logger;
         }
 
-        // Constructor legacy para tests que no dependen de auth de correo (FASE 4)
+        // Constructor legacy para tests que no dependen de auth de correo/cuarentena
         public InboundDeliveryService(IApplicationDbContext db, IMessageStore store,
             IRuleEngine rules, IAttachmentScanner scanner, IAddressResolutionService resolver,
             IAuditService audit, ILogger<InboundDeliveryService> logger)
-            : this(db, store, rules, scanner, resolver, audit, emailAuth: null, logger) { }
+            : this(db, store, rules, scanner, resolver, audit, emailAuth: null, quarantine: null, logger) { }
 
     public async Task<InboundResult> IngestAsync(string envelopeFrom, string envelopeTo, byte[] rawMime,
         string? helo, string? clientIp, bool authenticated, string actor, CancellationToken ct = default)
@@ -55,6 +57,14 @@ public class InboundDeliveryService : IInboundDeliveryService
         if (!resolved.Found)
             return await Reject(envelopeFrom, envelopeTo, "recipient_not_found", actor, clientIp, ct);
 
+        // FASE 5: remitente bloqueado → rechazar antes de persistir
+        if (!authenticated && _quarantine != null)
+        {
+            var blocked = await _quarantine.MatchBlockedAsync(envelopeFrom, ct);
+            if (blocked != null)
+                return await Reject(envelopeFrom, envelopeTo, $"sender_blocked ({blocked.Kind})", actor, clientIp, ct);
+        }
+
         // Persistir MIME inmediatamente (fail-safe: no perder por crash)
         var parsed = ParseMime(rawMime);
         string storeKey = await _store.SaveAsync(parsed.MessageIdHeader, rawMime, ct);
@@ -67,6 +77,22 @@ public class InboundDeliveryService : IInboundDeliveryService
             var mb = await _db.Mailboxes.FindAsync([resolved.MailboxId.Value], ct);
             if (mb != null && !QuotaPolicy.Accepts(mb.UsedBytes, mb.QuotaBytes, size))
                 overQuota = true;
+        }
+
+        // FASE 5: antimalware heurístico en cada adjunto (llenar ScanStatus + score)
+        double malwareScore = 0.0;
+        bool hasMalware = false;
+        if (parsed.Attachments.Count > 0)
+        {
+            foreach (var att in parsed.Attachments)
+            {
+                AttachmentScanStatus status;
+                try { status = await _scanner.ScanAsync(att, ct); }
+                catch { status = AttachmentScanStatus.ScannerUnavailable; }
+                att.ScanStatus = status;   // MessageAttachment lo copia a Attachment.ScanStatus
+                if (status == AttachmentScanStatus.Malicious) { malwareScore += 4.0; hasMalware = true; }
+                else if (status == AttachmentScanStatus.Suspicious) malwareScore += 1.5;
+            }
         }
 
         // Spam score (simple: señales locales; no API comercial)
@@ -105,21 +131,36 @@ public class InboundDeliveryService : IInboundDeliveryService
         if (!moveToSpam && folderOverride is not null && folderOverride.Equals("Spam", StringComparison.OrdinalIgnoreCase))
             targetFolder = SystemFolder.Spam;
 
-        SpamDecision decision = !authenticated && spam.Score + authScore >= 6 ? SpamDecision.Spam : SpamDecision.Allow;
-        if (dmarcReject && !authenticated) decision = SpamDecision.Reject;
-        else if (dmarcQuarantine && !authenticated) decision = SpamDecision.Quarantine;
-        if (overQuota) decision = SpamDecision.Quarantine;
+        double totalScore = spam.Score + authScore + malwareScore;
+        SpamDecision decision = !authenticated && totalScore >= 6 ? SpamDecision.Spam : SpamDecision.Allow;
+        string? quarantineReason = null;
+        if (hasMalware && !authenticated)
+        {
+            decision = SpamDecision.Quarantine; quarantineReason = "malware";
+        }
+        else if (dmarcReject && !authenticated)
+        {
+            decision = SpamDecision.Reject;
+        }
+        else if (dmarcQuarantine && !authenticated)
+        {
+            decision = SpamDecision.Quarantine; quarantineReason = "dmarc";
+        }
+        else if (overQuota)
+        {
+            decision = SpamDecision.Quarantine; quarantineReason = "over-quota";
+        }
 
         // STORE metadata
         if (!resolved.MailboxId.HasValue)
             return await Reject(envelopeFrom, envelopeTo, "recipient_not_found", actor, clientIp, ct);
-        await StoreMetadataAsync(envelopeFrom, envelopeTo, parsed, storeKey, size, decision, spam.Score + authScore,
-            resolved.MailboxId.Value, targetFolder, ct);
+        await StoreMetadataAsync(envelopeFrom, envelopeTo, parsed, storeKey, size, decision, totalScore,
+            resolved.MailboxId.Value, targetFolder, quarantineReason, ct);
 
         if (decision == SpamDecision.Spam) targetFolder = SystemFolder.Spam;
 
         await _audit.RecordAsync("Smtp.Ingest", actor, null, clientIp, "message", envelopeTo, "OK",
-            $"decision={decision} score={spam.Score + authScore:F1} auth=[{authSummary}] store={storeKey}", ct);
+            $"decision={decision} score={totalScore:F1} auth=[{authSummary}]{(quarantineReason != null ? $" q={quarantineReason}" : "")} store={storeKey}", ct);
         _logger.LogInformation("Ingesta SMTP OK {To} de {From} decision={Decision}", envelopeTo, envelopeFrom, decision);
         return decision == SpamDecision.Reject ? InboundResult.Rejected
             : decision == SpamDecision.Quarantine ? InboundResult.Quarantined
@@ -155,7 +196,8 @@ public class InboundDeliveryService : IInboundDeliveryService
     }
 
     private async Task StoreMetadataAsync(string envelopeFrom, string envelopeTo, ParsedMessage parsed,
-        string storeKey, long size, SpamDecision decision, double score, long mailboxId, SystemFolder targetFolder, CancellationToken ct)
+        string storeKey, long size, SpamDecision decision, double score, long mailboxId, SystemFolder targetFolder,
+        string? quarantineReason, CancellationToken ct)
     {
         var mb = await _db.Mailboxes.FindAsync([mailboxId], ct) ?? throw new InvalidOperationException("Buzón local no existe");
         var folder = await _db.Folders.FirstAsync(f => f.MailboxId == mailboxId && f.SystemName == targetFolder, ct);
@@ -175,7 +217,10 @@ public class InboundDeliveryService : IInboundDeliveryService
             IsHtml = parsed.HasHtml,
             SpamDecision = decision,
             SpamScore = score,
-            InReplyTo = string.IsNullOrWhiteSpace(parsed.InReplyTo) ? null : parsed.InReplyTo
+            InReplyTo = string.IsNullOrWhiteSpace(parsed.InReplyTo) ? null : parsed.InReplyTo,
+            IsQuarantined = decision == SpamDecision.Quarantine,
+            QuarantineReason = quarantineReason,
+            QuarantinedAtUtc = decision == SpamDecision.Quarantine ? DateTime.UtcNow : null
         };
         _db.Messages.Add(message);
 
@@ -212,7 +257,7 @@ public class InboundDeliveryService : IInboundDeliveryService
             ContentType = att.ContentType,
             SizeBytes = att.Data.Length,
             Sha256 = sha,
-            ScanStatus = AttachmentScanStatus.Unknown
+            ScanStatus = att.ScanStatus
         };
     }
 

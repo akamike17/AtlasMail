@@ -1,3 +1,4 @@
+using AtlasMail.Domain.Enums;
 using AtlasMail.Domain.Mime;
 
 namespace AtlasMail.Application.Abstractions;
@@ -178,3 +179,45 @@ public sealed record DomainMailAuthStatus(
     bool DkimEnabled, string? DkimSelector, string? DkimPublicKeyRecord,
     string? DmarcPolicy, string? DmarcRecordToPublish,
     string? DkimPrivateKeyHint); // nunca exponer la clave privada completa
+
+/// <summary>
+/// Servicio de cuarentena (spec §22, FASE 5). SecurityAdmin puede listar, inspeccionar,
+/// liberar, eliminar y bloquear remitentes. El usuario tiene vista limitada por política.
+/// </summary>
+public interface IQuarantineService
+{
+    /// <summary>Mensajes en cuarentena (opcionalmente filtrados por dominio/buzón).</summary>
+    Task<IReadOnlyList<QuarantineItem>> ListAsync(int skip = 0, int take = 50, long? mailboxId = null, CancellationToken ct = default);
+    /// <summary>Inspecciona metadatos + adjuntos de un mensaje en cuarentena (sin el MIME completo).</summary>
+    Task<QuarantineInspect?> InspectAsync(long messageId, CancellationToken ct = default);
+    /// <summary>Libera (entrega al buzón del destinatario en la carpeta indicada; spam → Spam).</summary>
+    Task<bool> ReleaseAsync(long messageId, CancellationToken ct = default);
+    /// <summary>Elimina definitivamente (metadatos + blob del store) un mensaje en cuarentena.</summary>
+    Task<bool> DeleteAsync(long messageId, CancellationToken ct = default);
+    /// <summary>Bloquea un remitente (exacto o por dominio) y elimina los mensajes del bloqueado en cola.</summary>
+    Task<bool> BlockSenderAsync(string value, SenderMatchKind kind, string? reason, string? actor, CancellationToken ct = default);
+    /// <summary>Lista de remitentes bloqueados.</summary>
+    Task<IReadOnlyList<BlockedSenderInfo>> ListBlockedAsync(CancellationToken ct = default);
+    /// <summary>Desbloquea un remitente.</summary>
+    Task<bool> UnblockAsync(long id, CancellationToken ct = default);
+    /// <summary>Comprueba si una dirección de remitente coincide con la blocklist (ingesta).</summary>
+    Task<IBlockedMatch?> MatchBlockedAsync(string senderAddress, CancellationToken ct = default);
+}
+
+/// <summary>Coincidencia de blocklist devuelta a la ingesta.</summary>
+public interface IBlockedMatch { string Kind { get; } }
+
+/// <summary>Elemento de la lista de cuarentena.</summary>
+public sealed record QuarantineItem(
+    long MessageId, long MailboxId, string Recipient, string Sender, string Subject,
+    string Reason, double Score, int AttachmentCount, string WorstScan, DateTime ReceivedAtUtc, DateTime QuarantinedAtUtc);
+
+/// <summary>Vista de inspección de un mensaje en cuarentena (sin el MIME crudo).</summary>
+public sealed record QuarantineInspect(
+    long MessageId, string Sender, string Subject, long SizeBytes, DateTime ReceivedAtUtc,
+    string? BodyPreview, bool IsHtml, string ScanSummary,
+    IReadOnlyList<QuarantineAttachment> Attachments);
+
+public sealed record QuarantineAttachment(string FileName, string ContentType, long SizeBytes, string Sha256, string ScanStatus);
+
+public sealed record BlockedSenderInfo(long Id, string Value, string Kind, string? Reason, DateTime CreatedAtUtc, string? CreatedBy);

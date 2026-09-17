@@ -2,8 +2,9 @@
 
 Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 1.md),
 **FASE 2 completada** (SMTP robusto + entrega externa),
-**FASE 3 completada** (IMAP y clientes externos) y
-**FASE 4 completada** (SPF/DKIM/DMARC).
+**FASE 3 completada** (IMAP y clientes externos),
+**FASE 4 completada** (SPF/DKIM/DMARC) y
+**FASE 5 completada** (antispam/quarantine/antimalware).
 
 ## CICLO 1 — COMPLETADO ✅
 - Arquitectura modular (`src/*` + `tests/*`, .NET 8, MySQL/Pomelo).
@@ -67,12 +68,25 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 - Honestidad: la verificación SPF/DKIM/DMARC en recepción contra DNS público depende de que el dominio
   exista; en la suite se valida el flujo sin red (SPF None / DKIM none / DMARC NoRecord).
 
-## FASE 5 — Antispam / quarantine / antimalware
-- Scoring ampliado (reputación, historial, MDMF); cuarentena administrable y liberación auditada.
-- Antimalware real (ClamAV u otro) sustituyendo al `NoOpAttachmentScanner` (NoOp etiquetado,
-  nunca marca Unknown como Clean).
+## FASE 5 — Antispam / quarantine / antimalware ✅
+- **Antimalware heurístico real** (`HeuristicAttachmentScanner`, spec §21): NO es NoOp. Detecta por
+  extensión de alto riesgo (executables/scripts), double-extension/spoofing, magic bytes (MZ/ELF/Mach-O/PDF),
+  macros VBA en `.docm/.xlsm/.pptm` (ZIP con vbaProject.bin) y HTML ofuscado. Devuelve
+  Clean/Suspicious/Malicious/Unknown/ScannerUnavailable. **Nunca etiqueta Unknown como Clean** (§21).
+  Interfaz `IAttachmentScanner` lista para pluguear ClamAV u otro motor.
+- **Integración al pipeline**: en recepción se escanea cada adjunto (llena `Attachment.ScanStatus`),
+  Malicious → cuarentena `malware`, Suspicious sube el score; se usa el score total
+  (spam + auth + malware) para la decisión.
+- **Cuarentena (§22)**: `Message.IsQuarantined` + motivo + fecha. `QuarantineService` permite a
+  SecurityAdmin listar, inspeccionar (metadatos/adjuntos, sin MIME completo), **liberar**, **eliminar**
+  y **bloquear remitente** (exacto o por dominio). La blocklist rechaza en la ingesta antes de persistir.
+- **Endpoints (SecurityAdmin/SuperAdmin)**: `GET/POST/DELETE /api/admin/quarantine[...]`,
+  `GET /api/admin/quarantine/blocked`, `POST /api/admin/quarantine/block`, `DELETE /api/admin/quarantine/blocked/{id}`.
+- Migración EF `QuarantineBlockSenders` (BlockedSenders + campos de Message).
+- Tests: **unit 105/105** (+11: scanner heurístico electrizado, doble-ext, macro VBA, Unknown≠Clean,
+  zip con exe, quarantine liberar/eliminar/bloquear-domain) e **integration 18/18** (+1: endpoints de cuarentena).
 
-## FASE 6 — Calendar / Contacts / Groups
+## FASE 6 — Calendar / contacts / groups
 - Calendario (día/semana/mes, `.ics`), contactos (VCARD/CSV), listas de distribución y grupos con políticas.
 
 ## FASE 7 — Alta disponibilidad / replicación / observabilidad avanzada

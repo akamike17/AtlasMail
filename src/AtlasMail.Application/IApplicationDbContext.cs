@@ -25,6 +25,7 @@ public interface IApplicationDbContext
     DbSet<LoginAttempt> LoginAttempts { get; }
     DbSet<Contact> Contacts { get; }
     DbSet<ConfigurationEntry> ConfigurationEntries { get; }
+    DbSet<BlockedSender> BlockedSenders { get; }
 
     DatabaseFacade Database { get; }
     Task<int> SaveChangesAsync(CancellationToken ct = default);

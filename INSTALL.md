@@ -82,7 +82,23 @@ Registros a publicar en tu DNS:
 - **DKIM**: `v=DKIM1; k=rsa; p=<clave-pública>` en `atlasmail._domainkey.<dominio>` TXT.
 - **DMARC**: `v=DMARC1; p=<policy>; adkim=r; aspf=r; fo=1` en `_dmarc.<dominio>` TXT.
 
-## 7. IMAP (FASE 3)
+## 7. Antispam / antimalware / cuarentena (FASE 5)
+- **Antimalware**: por defecto se usa un scanner heurístico local (`HeuristicAttachmentScanner`, sin API
+  comercial). Detecta ejecutables/scripts, double-extension, magic bytes y macros de Office. Lo que no
+  reconoce queda en **Unknown** (nunca Clean). Para firmas reales se puede pluguear ClamAV detrás de
+  `IAttachmentScanner`.
+- **Cuarentena (§22)**: los mensajes marcados Spam/Quarantine/Malicious se aíslan en cuarentena
+  (no visibles en el buzón). SecurityAdmin/SuperAdmin puede listar, inspeccionar, **liberar**, **eliminar**
+  y **bloquear remitente** desde el Admin Center:
+  - `GET  /api/admin/quarantine` — lista
+  - `GET  /api/admin/quarantine/{id}` — inspección (sin MIME completo)
+  - `POST /api/admin/quarantine/{id}/release` — liberar al buzón
+  - `DELETE /api/admin/quarantine/{id}` — eliminar (borra metadata + blob)
+  - `POST /api/admin/quarantine/block` `{value, kind:"exact"|"domain", reason}` — bloquear remitente
+  - `GET /api/admin/quarantine/blocked` / `DELETE /api/admin/quarantine/blocked/{id}` — gestionar blocklist
+- El remitente bloqueado se rechaza ya en la recepción (antes de persistir).
+
+## 8. IMAP (FASE 3)
 Servidor IMAP4rev1 (login, listar/select carpetas, listar y obtener mensajes, flags, mover, eliminar):
 
 ```bash
@@ -95,7 +111,7 @@ export Imap__MaxMessageBytes=52428800
 Clientes: host `mail.midominio.com`, puerto 143, IMAP normal (sin autenticación SSL aún; se puede añadir
 STARTTLS/IMAPS en una fase posterior). Autenticación con el **password del buzón** (mismo que SMTP AUTH).
 
-## 8. Ejecutar
+## 9. Ejecutar
 ```bash
 # Web (admin + webmail) — arranca también SMTP / IMAP (si enabled) y el worker de cola
 dotnet run --project src/AtlasMail.Web -c Release
@@ -107,7 +123,7 @@ dotnet run --project src/AtlasMail.Worker -c Release
 La Web levanta internamente el DeliveryWorker (cola). Para producción puede ejecutarse el Worker
 como proceso aparte apuntando a la misma DB/message-store.
 
-## 9. Verificación de humo
+## 10. Verificación de humo
 - `GET /health` → 200.
 - `GET /Account/Login` → 200 HTML.
 - Login del admin → redirect a `/Admin` (dashboard).

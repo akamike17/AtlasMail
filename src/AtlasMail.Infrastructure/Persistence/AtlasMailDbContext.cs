@@ -25,6 +25,7 @@ public class AtlasMailDbContext : DbContext, IApplicationDbContext
     public DbSet<LoginAttempt> LoginAttempts => Set<LoginAttempt>();
     public DbSet<Contact> Contacts => Set<Contact>();
     public DbSet<ConfigurationEntry> ConfigurationEntries => Set<ConfigurationEntry>();
+    public DbSet<BlockedSender> BlockedSenders => Set<BlockedSender>();
 
     public Task<int> ExecuteSqlRawAsync(string sql, CancellationToken ct = default)
         => Database.ExecuteSqlRawAsync(sql, ct);

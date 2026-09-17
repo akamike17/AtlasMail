@@ -51,6 +51,13 @@ public enum AttachmentScanStatus
     ScannerUnavailable = 4
 }
 
+/// <summary>Modo de coincidencia para bloqueo de remitente (FASE 5).</summary>
+public enum SenderMatchKind
+{
+    Exact = 0,
+    Domain = 1
+}
+
 /// <summary>Carpetas estándar por buzón.</summary>
 public enum SystemFolder
 {
