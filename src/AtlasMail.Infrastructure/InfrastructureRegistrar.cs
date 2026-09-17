@@ -7,6 +7,7 @@ using AtlasMail.Infrastructure.Imap;
 using AtlasMail.Infrastructure.Persistence;
 using AtlasMail.Infrastructure.Storage;
 using AtlasMail.Security.Antimalware;
+using AtlasMail.Security.MailIntelligence;
 using DnsClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -47,7 +48,11 @@ public static class InfrastructureRegistrar
         // FASE 5: antimalware heurístico real local (spec §21, sin API comercial). Interfaz lista
         // para pluguear ClamAV u otro motor detrás de IAttachmentScanner.
         services.AddScoped<IAttachmentScanner, HeuristicAttachmentScanner>();
-        services.AddSingleton<IMailIntelligenceService, DisabledMailIntelligenceService>();
+        // FASE 8 / §31: IA local heurística si Ai:Enabled, si no Disabled (servidor funciona sin ella)
+        services.AddSingleton<IMailIntelligenceService>(sp =>
+            config.GetValue("Ai:Enabled", false)
+                ? (IMailIntelligenceService)new LocalMailIntelligenceService()
+                : new DisabledMailIntelligence());
 
         // FASE 2: entrega externa (DNS MX + política + rate limit)
         services.AddSingleton<IMxResolver>(sp =>

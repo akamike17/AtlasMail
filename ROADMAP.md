@@ -5,8 +5,9 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 **FASE 3 completada** (IMAP y clientes externos),
 **FASE 4 completada** (SPF/DKIM/DMARC),
 **FASE 5 completada** (antispam/quarantine/antimalware),
-**FASE 6 completada** (calendar/contacts/groups) y
-**FASE 7 completada** (alta disponibilidad / observabilidad avanzada).
+**FASE 6 completada** (calendar/contacts/groups),
+**FASE 7 completada** (alta disponibilidad / observabilidad avanzada) y
+**FASE 8 completada** (IA opcional y local).
 
 ## CICLO 1 — COMPLETADO ✅
 - Arquitectura modular (`src/*` + `tests/*`, .NET 8, MySQL/Pomelo).
@@ -122,9 +123,14 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 - Tests: **unit 119/119** (+4: metrics increment/gauge/timer, sanitización de nombres, thread-safe) e
   **integration 19/19** (+1: /api/metrics con login fallido, storage/queue, texto sin password).
 
-## FASE 8 — IA opcional y desacoplada
-- `IMailIntelligenceService` (Disabled por defecto): resumen, clasificación, prioridad, phishing asistido,
-  búsqueda semántica. Sin IA el servidor funciona completo.
+## FASE 8 — IA opcional ✅
+- `IMailIntelligenceService` desacoplado (§31): servidor funciona sin IA (Disabled por defecto).
+- `LocalMailIntelligenceService` (Security): prioridad (0-100), clasificación (General/Urgent/Finance/
+  Marketing/Newsletter/Social/Notification/Security), riesgo de phishing asistido (0-100 + señales,
+  URLs con IP/redirectors) y resumen extractivo. **100% local, no envía contenido a proveedores externos** (§31).
+- Activación explícita: `Ai__Enabled=true`. Endpoint webmail `POST /api/personal/ai/analyze`
+  (requiere sesión; si está deshabilitada responde `enabled:false`).
+- Tests: **unit 124/124** (+5: clasificación/prioridad/phishing/resumen/disabled) e **integration 20/20** (+1: disabled por defecto).
 
 ## Principios permanentes (§53)
 NO open relay · NO pérdida silenciosa · NO doble entrega · NO passwords reversibles ·

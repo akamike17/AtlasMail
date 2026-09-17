@@ -58,4 +58,18 @@ public class QuarantineApiTests : IClassFixture<AtlasMailFactory>
         text.Should().Contain("auth_login_failures ");
         text.Should().NotContainAny("password", "secret");
     }
+
+    [Fact]
+    public async Task Ia_analyze_esta_deshabilitada_por_defecto()
+    {
+        var client = _factory.CreateClient();
+        // construir un cliente webmail: la IA requiere sesión; con IA deshabilitada devuelve enabled=false
+        // (login admin y pedir a /api/personal/ai/analyze con csrf)
+        var admin = await _factory.CreateAdminClientAsync();
+        var res = await admin.PostAsJsonAsync("/api/personal/ai/analyze", new { subject = "urgente", body = "verifica tu cuenta ahora" });
+        var json = await res.Content.ReadAsStringAsync();
+        // por defecto Ai:Enabled=false en el factory, por lo que el endpoint responde enabled=false
+        var root = Body(json);
+        root.GetProperty("enabled").GetBoolean().Should().BeFalse();
+    }
 }

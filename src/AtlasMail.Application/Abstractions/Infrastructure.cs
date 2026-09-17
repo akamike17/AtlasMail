@@ -34,11 +34,39 @@ public interface IAttachmentScanner
     Task<Domain.Enums.AttachmentScanStatus> ScanAsync(Domain.Mime.AttachmentPart attachment, CancellationToken ct = default);
 }
 
-/// <summary>IA opcional y desacoplada (sección 31). Disabled por defecto; servidor funciona sin ella.</summary>
+/// <summary>IA opcional y desacoplada (sección 31). Disabled por defecto; servidor funciona sin ella.
+/// La implementación es LOCAL/heurística y NUNCA envía el contenido del correo a proveedores externos
+/// sin configuración/consentimiento explícito (§31). Asistida, nunca decisión final de seguridad.</summary>
 public interface IMailIntelligenceService
 {
     bool Enabled { get; }
+    /// <summary>Prioridad (0-100) por señales locales.</summary>
+    int Priority(SubjectBody subjectBody);
+    /// <summary>Clasificación de negocio.</summary>
+    MailIntelligenceCategory Classify(SubjectBody subjectBody);
+    /// <summary>Riesgo de phishing asistido (0-100) + señales. No reemplaza a antimalware/antispam.</summary>
+    PhishingAssessment AssessPhishing(SubjectBody subjectBody);
+    /// <summary>Resumen extrativo local (máx caracteres).</summary>
+    string Summarize(SubjectBody subjectBody, int maxChars = 180);
 }
+
+public sealed record SubjectBody(string Subject, string Body);
+public sealed record PhishingAssessment(int Score, IReadOnlyList<string> Signals);
+
+public enum MailIntelligenceCategory
+{
+    General = 0,
+    Urgent = 1,
+    Notification = 2,
+    Finance = 3,
+    Marketing = 4,
+    Social = 5,
+    Newsletter = 6,
+    Security = 7
+}
+
+public sealed record MailIntelligenceResult(
+    int Priority, string Category, string Summary, int PhishingScore, IReadOnlyList<string> PhishingSignals);
 
 public sealed record MessageSearchQuery(
     string? Sender = null,

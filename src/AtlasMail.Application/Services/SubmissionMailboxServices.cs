@@ -254,8 +254,4 @@ public class NoOpAttachmentScanner : IAttachmentScanner
     }
 }
 
-/// <summary>IA desacoplada: deshabilitada por defecto; servidor funciona sin ella (sección 31).</summary>
-public class DisabledMailIntelligenceService : IMailIntelligenceService
-{
-    public bool Enabled => false;
-}
+/// <summary>IA desacoplada registrada en DI: Local si Ai:Enabled, Disabled por defecto (sección 31).</summary>

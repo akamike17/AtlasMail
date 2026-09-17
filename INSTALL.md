@@ -121,7 +121,14 @@ Colaboración por webmail, con interoperabilidad estándar:
   - `GET /api/metrics/text` → texto plano estilo Prometheus (nombres sanitizados).
 - Config: `Delivery__Concurrency=4`, `Delivery__Hostname=atlasmail.local`, `Delivery__LoopIntervalMs=2000`.
 
-## 10. IMAP (FASE 3)
+## 10. IA opcional (FASE 8)
+IA **local y desacoplada** (spec §31): el servidor funciona perfectamente sin ella. Por defecto deshabilitada.
+- `Ai__Enabled=true` activa `LocalMailIntelligenceService` (prioridad, clasificación, phishing asistido,
+  resumen extractivo — 100% local, no envía el contenido del correo a ningún proveedor externo).
+- Endpoint webmail (requiere sesión): `POST /api/personal/ai/analyze` con `{subject, body}`.
+- Si está deshabilitada, responde `{"enabled":false}`.
+
+## 11. IMAP (FASE 3)
 Servidor IMAP4rev1 (login, listar/select carpetas, listar y obtener mensajes, flags, mover, eliminar):
 
 ```bash
@@ -134,7 +141,7 @@ export Imap__MaxMessageBytes=52428800
 Clientes: host `mail.midominio.com`, puerto 143, IMAP normal (sin autenticación SSL aún; se puede añadir
 STARTTLS/IMAPS en una fase posterior). Autenticación con el **password del buzón** (mismo que SMTP AUTH).
 
-## 11. Ejecutar
+## 12. Ejecutar
 ```bash
 # Web (admin + webmail) — arranca también SMTP / IMAP (si enabled) y el worker de cola
 dotnet run --project src/AtlasMail.Web -c Release
@@ -146,7 +153,7 @@ dotnet run --project src/AtlasMail.Worker -c Release
 La Web levanta internamente el DeliveryWorker (cola). Para producción puede ejecutarse el Worker
 como proceso aparte apuntando a la misma DB/message-store.
 
-## 12. Verificación de humo
+## 13. Verificación de humo
 - `GET /health` → 200.
 - `GET /Account/Login` → 200 HTML.
 - Login del admin → redirect a `/Admin` (dashboard).

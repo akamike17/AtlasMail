@@ -1,8 +1,49 @@
-# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 a FASE 7)
+# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 a FASE 8)
 
-Fecha FASE 7: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
+Fecha FASE 8: 2026-09-17. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
 
-## FASE 7 — Definition of Done
+## FASE 8 — Definition of Done
+
+| Requisito FASE 8 (spec §31) | Resultado | Evidencia |
+|---|---|---|
+| `dotnet build -c Release` → 0 errores | ✅ | `0 errores` |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **124/124** + Integration **20/20** = **144/144** |
+| `IMailIntelligenceService` desacoplado | ✅ | Application; servidor funciona sin IA (Disabled default) |
+| Servidor sin IA | ✅ | Integration: `/api/personal/ai/analyze` responde `enabled:false` |
+| IA local sin API comercial | ✅ | `LocalMailIntelligenceService` heurístico, determinista |
+| No enviar contenido fuera (§31) | ✅ | 100% local; sin llamadas de red |
+| Prioridad / clasificación | ✅ | Tests: Finance/Urgent, prioridad alta>baja |
+| Detección phishing asistida | ✅ | Señales detectadas; phishing 0 en mensaje limpio |
+| Resumen extractivo | ✅ | Acortado dentro de límite |
+| Asistida, no decisión final | ✅ | Documentado; no afecta spam/antimalware |
+| Activación explícita | ✅ | `Ai__Enabled`; endpoint webmail `POST ai/analyze` |
+
+## Ejecuciones reales FASE 8
+
+### Build / Tests
+```
+Compilación correcta.  0 Errores
+AtlasMail.UnitTests.dll:  Correctas!  124/124 (0 error)
+AtlasMail.IntegrationTests.dll: Correctas!  20/20 (0 error)
+```
+
+### Smoke real (Ai__Enabled=true, MySQL vivo)
+```
+POST /api/personal/ai/analyze
+  {subject:"URGENTE verifica tu cuenta", body:"Tu cuenta será suspendida. Click here to reset your password immediately."}
+  -> enabled:true priority:58 category:Security phishing:50 signals:["click here to reset","tu cuenta será suspendida","urgencia: immediately"]
+POST /api/personal/ai/analyze {subject:"Reunion", body:"Gracias por la nota, nos vemos el lunes."}
+  -> priority:25 category:General phishing:0
+```
+
+### Nota de honestidad (FASE 8)
+- IA es **local/heurística** (prioridad/clasificación/phishing asistido/resumen extractivo deterministas).
+  No hay LLM externo: las funciones avanzadas del spec §31 (traducción, respuesta sugerida, búsqueda
+  semántica) requieren un backend externo que, según §31, sólo se integraría con consentimiento explícito
+  del operador. Hasta entonces se mantiene Disabled por defecto y sin envío de datos.
+- La detección de phishing es ASISTIDA: puede tener falsos positivos/negativos y nunca bloquea por sí sola.
+
+## FASE 7 — Definition of Done (para referencia)
 
 | Requisito FASE 7 (spec §32, §37-38) | Resultado | Evidencia |
 |---|---|---|

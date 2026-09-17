@@ -8,6 +8,7 @@ Servidor empresarial de correo y colaboración self-hosted. Multi-dominio.
 **FASE 5**: antispam/quarantine/antimalware (scanner heurístico real, cuarentena administrable, blocklist).
 **FASE 6**: calendar/contacts/groups (calendario .ics, contactos VCARD/CSV, listas de distribución con políticas y anti-loop).
 **FASE 7**: HA/observabilidad avanzada (worker concurrente con lease/claim, métricas sin datos sensibles, /api/metrics).
+**FASE 8**: IA opcional local (prioridad/clasificación/phishing asistido/resumen, sin API externa).
 
 ## Stack
 - ASP.NET Core 8 (MVC + Razor + JS `fetch()`), Bootstrap local (sin CDN).
@@ -97,6 +98,14 @@ Web → Infrastructure+Application+Protocols+Security+Worker.
   (queue.pending, storage.bytes, concurrency, last_heartbeat_unix).
 - **Endpoints**: `GET /api/metrics` (JSON con backfill de storage/queue) y `GET /api/metrics/text`
   (texto plano Prometheus, nombres sanitizados). `/health` y `/api/health` existentes.
+
+## IA opcional y desacoplada (spec §31) — FASE 8
+- `IMailIntelligenceService` (Application) desacoplado; servidor funciona sin IA (Disabled por defecto).
+- `Security/MailIntelligence/LocalMailIntelligenceService`: 100% local/heurística — prioridad (0-100),
+  clasificación (General/Urgent/Finance/Marketing/Newsletter/Social/Notification/Security), phishing
+  asistido (0-100 + señales, URLs IP/redirectors) y resumen extractivo. **No envía contenido a
+  proveedores externos** (§31). Es asistencia, nunca decisión final de seguridad.
+- Activación: `Ai__Enabled=true`. Endpoint webmail `POST /api/personal/ai/analyze`.
 
 ## Persistencia y almacenamiento de mensajes (spec §1)
 - **No** se guarda MIME completo en MySQL.

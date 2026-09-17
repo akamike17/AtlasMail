@@ -17,10 +17,12 @@ public class MailPersonalController : ControllerBase
     private readonly ICalendarService _calendar;
     private readonly IContactService _contacts;
     private readonly ICurrentUser _current;
+    private readonly AtlasMail.Application.Abstractions.IMailIntelligenceService _intelligence;
 
-    public MailPersonalController(ICalendarService calendar, IContactService contacts, ICurrentUser current)
+    public MailPersonalController(ICalendarService calendar, IContactService contacts, ICurrentUser current,
+        AtlasMail.Application.Abstractions.IMailIntelligenceService intelligence)
     {
-        _calendar = calendar; _contacts = contacts; _current = current;
+        _calendar = calendar; _contacts = contacts; _current = current; _intelligence = intelligence;
     }
 
     private async Task<long> MailboxId() => (await _current.GetMailboxIdAsync(CancellationToken.None))!.Value;
@@ -115,4 +117,26 @@ public class MailPersonalController : ControllerBase
         string content = await new System.IO.StreamReader(Request.Body).ReadToEndAsync();
         return Ok(await _contacts.ImportCsvAsync(await MailboxId(), content));
     }
+
+    // ---------- IA asistida (FASE 8, spec §31) ----------
+
+    [HttpPost("ai/analyze")]
+    public async Task<IActionResult> AiAnalyze([FromBody] AiAnalyzeRequest req)
+    {
+        if (!_intelligence.Enabled) return Ok(new { enabled = false });
+        // No accede a datos del buzón: analiza el texto enviado por el usuario. Sólo requiere sesión.
+        var sb = new AtlasMail.Application.Abstractions.SubjectBody(req.Subject ?? "", req.Body ?? "");
+        var ph = _intelligence.AssessPhishing(sb);
+        return Ok(new
+        {
+            enabled = true,
+            priority = _intelligence.Priority(sb),
+            category = _intelligence.Classify(sb).ToString(),
+            summary = _intelligence.Summarize(sb),
+            phishing = ph.Score,
+            phishingSignals = ph.Signals
+        });
+    }
 }
+
+public sealed record AiAnalyzeRequest(string? Subject, string? Body);
