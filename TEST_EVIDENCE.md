@@ -1,6 +1,37 @@
-# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 a FASE 8 + backend de IA)
+# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 a FASE 9)
 
-Fecha FASE 8-avanzada: 2026-09-17. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
+Fecha FASE 9: 2026-09-17. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
+
+## FASE 9 — Endurecimiento — Definition of Done
+
+| Requisito (spec §48/§49) | Resultado | Evidencia |
+|---|---|---|
+| `dotnet build -c Release` → 0 errores | ✅ | `Compilación correcta` |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **130/130** + Integration **22/22** = **152/152** |
+| **huge DATA** (fix A) | ✅ | > `MaxMessageBytes` → **552** + descarte (no MIME truncado) |
+| **SMTP flood** (fix C) | ✅ | > `MaxCommandsPerConnection` → **421** + cierre |
+| **brute-force SMTP AUTH** (fix B) | ✅ | rate-limit por IP (10/15 min) + backoff |
+| open relay | ✅ | RelayPolicy deniega exteriores anónimos (E2E) |
+| path traversal store | ✅ | `Resolve` normaliza + rechaza escapes raíz |
+| zip bomb / antimalware | ✅ | no-descompresión + límite tamaño + scanner heurístico |
+| **§48 restore del store** | ✅ | `RestoreAsync` repuebla message store (`SaveWithKeyAsync`) |
+| Smoke §48 (destruir storage) | ✅ | correo → backup → storage destruido → restore → store repoblado (PASS) |
+
+### Ejecuciones reales FASE 9
+```
+Compilación correcta.  0 Errores
+UnitTests:  130/130 (0 error)   IntegrationTests:  22/22 (0 error)
+```
+Tests relevantes: `Oversize_DATA_rechazado_552_sin_entregar_truncado` (E2E, verifica 552 y buzón vacío),
+`Flood_de_comandos_cerrado_con_421` (E2E), `Restore_rechaza_hash_snapshot_corrupto`.
+
+Smoke §48: `PASS correo entregado · PASS store con mensaje · PASS backup · PASS storage destruido ·
+PASS restore success · PASS store repoblado (write-back) · RESULT OK` (log: "Backup ... restaurado (14 tablas, 1 archivos store)").
+
+### Honestidad (§44)
+- Los fixes A/B/C se verificaron E2E contra SMTP real (socket) sobre MySQL real.
+- §48: la prueba destruyó el storage y confirmó el write-back; no se probó la reconstrucción desde cero
+  de una máquina distinta (queda como arranque fresco documentado).
 
 ## FASE 8 (avanzada) — Backend de IA — Definition of Done
 

@@ -215,4 +215,85 @@ public class SmtpE2ETests : IAsyncLifetime
         okReply.Should().StartWith("235");
         badReply.Should().StartWith("535");
     }
+
+    [Fact]
+    public async Task Oversize_DATA_rechazado_552_sin_entregar_truncado()
+    {
+        // §49 "huge DATA": mensaje > MaxMessageBytes debe rechazarse con 552 y NO caer
+        // en el buzón ni entregar un MIME truncado.
+        var admin = await _factory.CreateAdminClientAsync();
+        var d = await (await admin.PostAsJsonAsync("/api/admin/domain", new { name = "big.local", plusAddressingEnabled = true })).Content.ReadAsStringAsync();
+        long domId = Body(d).GetProperty("id").GetInt64();
+        await admin.PostAsJsonAsync("/api/admin/mailbox", new { domainId = domId, localPart = "big", displayName = "Big", password = "Atl4smail1!" });
+        await admin.PostAsJsonAsync("/api/admin/user", new { username = "big", password = "Atl4smail1!", displayName = "Big", role = 0, domainId = domId });
+
+        var scopeFactory = _factory.Services.GetRequiredService<IServiceScopeFactory>();
+        // límite pequeño para forzar oversize rápido
+        _server = new SmtpServer(scopeFactory, new SmtpServerOptions { Port = 0, Hostname = "atlasmail.local", MaxMessageBytes = 4096 });
+        _server.Start();
+        int port = _server.EffectivePort;
+
+        string dataReply;
+        using (var c = new TcpClient())
+        {
+            await c.ConnectAsync("127.0.0.1", port).WaitAsync(TimeSpan.FromSeconds(5));
+            var reader = new StreamReader(c.GetStream(), Encoding.ASCII);
+            var writer = new StreamWriter(c.GetStream(), Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+            await reader.ReadLineAsync();
+            await writer.WriteLineAsync("HELO test"); await reader.ReadLineAsync();
+            await writer.WriteLineAsync("MAIL FROM:<ext@x.example>"); await reader.ReadLineAsync();
+            await writer.WriteLineAsync("RCPT TO:<big@big.local>"); await reader.ReadLineAsync();
+            await writer.WriteLineAsync("DATA"); await reader.ReadLineAsync();
+            await writer.WriteLineAsync("Subject: huge");
+            await writer.WriteLineAsync("");
+            // Cuerpo grande (~2000 líneas * 4 bytes > 4096)
+            for (int i = 0; i < 2000; i++) await writer.WriteLineAsync("xxxx");
+            await writer.WriteLineAsync(".");
+            dataReply = await reader.ReadLineAsync() ?? string.Empty;
+            await writer.WriteLineAsync("QUIT");
+            await reader.ReadLineAsync();
+        }
+
+        dataReply.Should().Contain("552");
+
+        // No quedó en el buzón: verificar que el folder Inbox NO tiene mensajes
+        var bobClient = _factory.CreateClient();
+        await bobClient.PostAsJsonAsync("/api/auth/login", new { username = "big", password = "Atl4smail1!" });
+        var foldersRaw = await (await bobClient.GetAsync("/api/mail/folders")).Content.ReadAsStringAsync();
+        var folders = Body(foldersRaw);
+        // Encontrar el folder con systemName Inbox
+        long inboxId = folders[0].GetProperty("id").GetInt64();
+        foreach (var f in folders.EnumerateArray())
+            if (f.GetProperty("systemName").GetInt32() == (int)AtlasMail.Domain.Enums.SystemFolder.Inbox) { inboxId = f.GetProperty("id").GetInt64(); break; }
+        var msgsRaw = await (await bobClient.GetAsync($"/api/mail/folder/{inboxId}/messages")).Content.ReadAsStringAsync();
+        Body(msgsRaw).GetArrayLength().Should().Be(0, "oversize no debe entregar mensaje truncado");
+    }
+
+    [Fact]
+    public async Task Flood_de_comandos_cerrado_con_421()
+    {
+        // §49 "SMTP command flooding": exceder MaxCommandsPerConnection cierra la conexión.
+        var scopeFactory = _factory.Services.GetRequiredService<IServiceScopeFactory>();
+        _server = new SmtpServer(scopeFactory, new SmtpServerOptions { Port = 0, Hostname = "atlasmail.local", MaxCommandsPerConnection = 5 });
+        _server.Start();
+        int port = _server.EffectivePort;
+
+        string lastReply = "";
+        using (var c = new TcpClient())
+        {
+            await c.ConnectAsync("127.0.0.1", port).WaitAsync(TimeSpan.FromSeconds(5));
+            var reader = new StreamReader(c.GetStream(), Encoding.ASCII);
+            var writer = new StreamWriter(c.GetStream(), Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+            await reader.ReadLineAsync(); // 220
+            for (int i = 0; i < 10; i++)
+            {
+                await writer.WriteLineAsync("NOOP");
+                string? line = null;
+                try { line = await reader.ReadLineAsync() ?? string.Empty; } catch (IOException) { line = string.Empty; }
+                if (!string.IsNullOrWhiteSpace(line)) lastReply = line;
+                if (lastReply.Contains("421")) break; // el servidor cerró la conexión
+            }
+        }
+        lastReply.Should().Contain("421");
+    }
 }

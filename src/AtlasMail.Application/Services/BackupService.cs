@@ -113,7 +113,7 @@ public class BackupService : IBackupService
         foreach (var f in Directory.GetFiles(Path.Combine(dir, "store")))
         {
             var data = await File.ReadAllBytesAsync(f, ct);
-            string fileSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)).ToLowerInvariant();
+            string fileSha = ComputeSha256File(f);
             string expectedSha = GetStoreSha(manifestPath, Path.GetFileName(f));
             if (!string.Equals(fileSha, expectedSha, StringComparison.OrdinalIgnoreCase))
                 return new RestoreResult(false, $"Hash del archivo store {Path.GetFileName(f)} no coincide", null, 0);
@@ -122,8 +122,18 @@ public class BackupService : IBackupService
         // 4. Restore DB snapshot (identificación por URL del método — implementación segura en snapshot)
         int restored = await ApplySnapshotAsync(snapshotPath, ct);
 
-        await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "OK", $"tables={restored}", ct);
-        _logger.LogInformation("Backup {Id} restaurado ({Restored} tablas)", backupId, restored);
+        // 5. Restore message store: escribir de vuelta cada archivo con su CLAVE ORIGINAL
+        //    (debe coincidir con el StoreKey referenciado por la DB). §48 backup/restore completo.
+        var storeMap = GetStoreKeyMap(manifestPath);
+        foreach (var (key, file) in storeMap)
+        {
+            string filePath = Path.Combine(dir, "store", file);
+            byte[] data = await File.ReadAllBytesAsync(filePath, ct);
+            await _store.SaveWithKeyAsync(key, data, ct);
+        }
+
+        await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "OK", $"tables={restored} store={storeMap.Count}", ct);
+        _logger.LogInformation("Backup {Id} restaurado ({Restored} tablas, {Store} archivos store)", backupId, restored, storeMap.Count);
         return new RestoreResult(true, null, backupId, restored);
     }
 
@@ -221,5 +231,15 @@ public class BackupService : IBackupService
             if (f.GetProperty("file").GetString() == fileName)
                 return f.GetProperty("sha256").GetString()!;
         return string.Empty;
+    }
+
+    /// <summary>Mapea clave original (storeKey) → nombre de archivo en el backup, desde el manifest.</summary>
+    private static List<(string Key, string File)> GetStoreKeyMap(string manifestPath)
+    {
+        var result = new List<(string, string)>();
+        using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        foreach (var f in doc.RootElement.GetProperty("storeFiles").EnumerateArray())
+            result.Add((f.GetProperty("key").GetString()!, f.GetProperty("file").GetString()!));
+        return result;
     }
 }

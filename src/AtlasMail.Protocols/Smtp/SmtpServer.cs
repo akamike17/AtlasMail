@@ -115,6 +115,8 @@ public sealed class SmtpServer : IAsyncDisposable
             string? rcptTo = null;
             var dataBuffer = new MemoryStream();
             bool inData = false;
+            bool dataOverflow = false;
+            int cmdCount = 0;
             var welcomeReceived = false;
 
             while (!token.IsCancellationRequested)
@@ -133,6 +135,15 @@ public sealed class SmtpServer : IAsyncDisposable
                     if (line == "." || line == "\u0015.")
                     {
                         inData = false;
+                        if (dataOverflow)
+                        {
+                            dataOverflow = false;
+                            dataBuffer.SetLength(0);
+                            mailFrom = null; rcptTo = null;
+                            // NO entregar mensajes truncados: 552 y descartar (NO pérdida silenciosa, §49/§53).
+                            await writer.WriteAsync("552 5.3.4 Message size exceeds fixed maximum\r\n");
+                            continue;
+                        }
                         var raw = dataBuffer.ToArray();
                         var result = await SafeHandleAsync(() => handler.HandleMessageAsync(mailFrom!, rcptTo!, raw, ctx, token));
                         await writer.WriteAsync(result + "\r\n");
@@ -143,9 +154,18 @@ public sealed class SmtpServer : IAsyncDisposable
                     // dot-stuffing: línea que empieza con ".." se reduce a "."
                     var dataLine = line.StartsWith("..") ? line[1..] : line;
                     var bytes = Encoding.UTF8.GetBytes(dataLine + "\n");
-                    if (dataBuffer.Length + bytes.Length > _options.MaxMessageBytes) { }
-                    else { dataBuffer.Write(bytes, 0, bytes.Length); }
+                    if (dataBuffer.Length + bytes.Length > _options.MaxMessageBytes)
+                        dataOverflow = true; // marcar y seguir consumiendo hasta "." (no entregar truncado)
+                    else
+                        dataBuffer.Write(bytes, 0, bytes.Length);
                     continue;
+                }
+
+                // Flooding: límite de comandos por conexión (NOOP/EHLO/RSET no productivos).
+                if (++cmdCount > _options.MaxCommandsPerConnection)
+                {
+                    await writer.WriteAsync($"421 4.7.0 Too many commands, connection closing\r\n");
+                    break;
                 }
 
                 var cmd = line.TrimEnd('\r');
@@ -385,6 +405,7 @@ public sealed class SmtpServerOptions
     public string Hostname { get; set; } = "atlasmail.local";
     public int MaxMessageBytes { get; set; } = 50 * 1024 * 1024;
     public int MaxConnectionsPerIp { get; set; } = 20;
+    public int MaxCommandsPerConnection { get; set; } = 1000;
     public int Backlog { get; set; } = 100;
     public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromMinutes(5);
 }

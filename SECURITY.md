@@ -50,6 +50,15 @@ NO cross-tenant access, NO secretos en logs, NO falsa evidencia. Fail-safe.
 | Passwords débiles | IPasswordPolicy | AdminService/unit |
 | Pérdida por crash | Persistir antes de 250; lease caduca | cola/worker |
 
-## Pendientes (FASE 2+)
-TLS/STARTTLS, AUTH SMTP real, MFA/TOTP, sanitización HTML completa, SPF/DKIM/DMARC efectivos,
-antimalware real, cuarentena admin. Ver ROADMAP.
+## Endurecimiento FASE 9 (spec §48/§49)
+- **huge DATA**: mensaje > `MaxMessageBytes` → **552 5.3.4** y descarte (no se entrega MIME truncado).
+- **SMTP flood**: `MaxCommandsPerConnection` (1000) por conexión → **421** + cierre.
+- **brute-force SMTP AUTH**: rate-limit por IP (10 fallos/15 min) + backoff 500 ms (el canal SMTP
+  no pasaba por el rate-limit web).
+- **§48 restore del store**: `RestoreAsync` repuebla el message store con claves originales
+  (`SaveWithKeyAsync`) — antes solo repoblaba la DB.
+- Límite de línea SMTP >1000 → `500`; `MaxConnectionsPerIp` (20/min); `MaxRecipientsPerMessage` por dominio.
+
+## Pendientes
+TLS/STARTTLS, MFA/TOTP, sanitización HTML completa del correo renderizado, DMARC p=none en despliegue.
+Ver ROADMAP y TEST_EVIDENCE.

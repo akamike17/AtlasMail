@@ -99,6 +99,33 @@ Web → Infrastructure+Application+Protocols+Security+Worker.
 - **Endpoints**: `GET /api/metrics` (JSON con backfill de storage/queue) y `GET /api/metrics/text`
   (texto plano Prometheus, nombres sanitizados). `/health` y `/api/health` existentes.
 
+## FASE 9 — Endurecimiento (aceptación, spec §48/§49)
+
+**§49 Casos de abuso auditados y cubiertos/cerrados:**
+- **huge DATA (fix A)**: los mensajes que exceden `MaxMessageBytes` se rechazan con **552 5.3.4**
+  y se descartan (ya NO se entrega un MIME truncado). Anteriormente el exceso se ignoraba
+  silenciosamente → mensaje truncado → riesgo de pérdida silenciosa. Corregido + test E2E.
+- **SMTP command flooding (fix C)**: límite `MaxCommandsPerConnection` (por defecto 1000) por
+  conexión → respuesta **421** y cierre al superarlo. Test E2E.
+- **brute-force SMTP AUTH (fix B)**: rate-limit por IP (`MaxAuthFailuresPerIp=10` en ventana de
+  15 min) con backoff 500 ms. El canal SMTP no pasaba por el rate-limit web; ahora está protegido.
+- **open relay**: política `RelayPolicy` (solo buzones locales anónimos; envío externo solo autenticado), test E2E deniega víctima externa.
+- **path traversal en store**: `FileSystemMessageStore.Resolve` normaliza y rechaza claves que escapen de la raíz.
+- **zip bomb / antimalware**: el pipeline NO descomprime adjuntos (sin decompression-dos); el
+  scanner heurístico marca ZIP/archivos con ejecutables y aplica límite global de tamaño.
+- **spoofed From / invalid MIME / header/CRLF**: SPF/DKIM/DMARC en recepción + spam score + parse
+  MIME tolerante (fallback `(no parseable)`). Línea SMTP >1000 → `500 Line too long`.
+- **recipient explosion**: `MaxRecipientsPerMessage` por dominio.
+- **queue duplication / XSS email / cross-domain IDOR**: lease/claim transaccional en la cola;
+  webmail sirve HTML del remitente con escape/aislamiento; endpoints aislados por `MailboxId` (anti-IDOR).
+
+**§48 Prueba de restore (fijada):** `BackupService.RestoreAsync` ahora restaura además de la DB
+el **message store** (escribe de vuelta cada archivo con su clave original vía `SaveWithKeyAsync`).
+Antes el restore solo repoblaba la DB → referencias a store keys inexistentes si el storage se perdió.
+Smoke E2E real: correo entregado → backup → **storage destruido** → restore → store repoblado (PASS).
+
+**Verificación FASE 9:** build 0 errores · unit 130/130 (+2 restore/hash) · integración 22/22 (+2 oversize/flood).
+
 ## IA opcional y desacoplada (spec §31) — FASE 8
 - `IMailIntelligenceService` (Application) desacoplado; servidor funciona sin IA (Disabled por defecto).
 - `Security/MailIntelligence/LocalMailIntelligenceService`: 100% local/heurística — prioridad (0-100),

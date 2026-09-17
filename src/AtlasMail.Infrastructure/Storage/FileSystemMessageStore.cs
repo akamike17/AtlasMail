@@ -57,6 +57,12 @@ public sealed class FileSystemMessageStore : IMessageStore
         }
     }
 
+    public Task SaveWithKeyAsync(string storeKey, byte[] rawMime, CancellationToken ct = default)
+    {
+        lock (_lock) File.WriteAllBytes(Resolve(storeKey), rawMime);
+        return Task.CompletedTask;
+    }
+
     public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken ct = default)
     {
         lock (_lock)

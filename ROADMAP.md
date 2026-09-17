@@ -6,8 +6,9 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 **FASE 4 completada** (SPF/DKIM/DMARC),
 **FASE 5 completada** (antispam/quarantine/antimalware),
 **FASE 6 completada** (calendar/contacts/groups),
-**FASE 7 completada** (alta disponibilidad / observabilidad avanzada) y
-**FASE 8 completada** (IA opcional y local).
+**FASE 7 completada** (alta disponibilidad / observabilidad avanzada),
+**FASE 8 completada** (IA opcional y local) y
+**FASE 9 completada** (endurecimiento: §48 restore real del store + §49 casos de abuso).
 
 ## CICLO 1 — COMPLETADO ✅
 - Arquitectura modular (`src/*` + `tests/*`, .NET 8, MySQL/Pomelo).
@@ -122,6 +123,17 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 - **Login metrics**: AuthController registra intentos/fallos/éxitos.
 - Tests: **unit 119/119** (+4: metrics increment/gauge/timer, sanitización de nombres, thread-safe) e
   **integration 19/19** (+1: /api/metrics con login fallido, storage/queue, texto sin password).
+
+## FASE 9 — Endurecimiento ✅
+- **§49 casos de abuso auditados**: open relay, SMTP command flooding, huge DATA, recipient
+  explosion, invalid MIME, zip bomb, path traversal, XSS email, spoofed From, brute-force login,
+  cross-domain IDOR, queue duplication, header/CRLF injection.
+- **Fixes cerrados**: (A) huge DATA excede MaxMessageBytes → rechazo **552** sin entregar MIME
+  truncado; (B) **rate-limit SMTP AUTH** por IP (10 fallos/15 min + backoff); (C) **flood de
+  comandos** → **421** y cierre (`MaxCommandsPerConnection`).
+- **§48 restore completo del store**: `RestoreAsync` ahora repuebla el message store (write-back
+  con claves originales vía `SaveWithKeyAsync`). Smoke E2E: backup → destruir storage → restore → store repoblado (PASS).
+- Tests: unit **130/130** (+2: restore reject hash) e integración **22/22** (+2: oversize 552, flood 421).
 
 ## FASE 8 — IA opcional ✅
 - `IMailIntelligenceService` desacoplado (§31): servidor funciona sin IA (Disabled por defecto).

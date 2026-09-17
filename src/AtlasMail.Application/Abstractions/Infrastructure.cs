@@ -19,6 +19,9 @@ public interface IMessageStore
     Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken ct = default);
     /// <summary>Espacio total usado (bytes) en el almacén.</summary>
     Task<long> TotalSizeAsync(CancellationToken ct = default);
+    /// <summary>Persiste el MIME crudo bajo una CLAVE EXPLÍCITA (restore de backup: debe coincidir
+    /// con el StoreKey que referencia la DB). Si ya existe, sobrescribe.</summary>
+    Task SaveWithKeyAsync(string storeKey, byte[] rawMime, CancellationToken ct = default);
 }
 
 /// <summary>Motor de búsqueda de mensajes (sección 12). Aislamiento: solo mensajes autorizados.</summary>
