@@ -1,10 +1,46 @@
-# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 a FASE 8)
+# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 a FASE 8 + backend de IA)
 
-Fecha FASE 8: 2026-09-17. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
+Fecha FASE 8-avanzada: 2026-09-17. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
 
-## FASE 8 — Definition of Done
+## FASE 8 (avanzada) — Backend de IA — Definition of Done
 
-| Requisito FASE 8 (spec §31) | Resultado | Evidencia |
+| Requisito (spec §31) | Resultado | Evidencia |
+|---|---|---|
+| `dotnet build -c Release` → 0 errores | ✅ | `0 errores` |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **129/129** + Integration **20/20** = **149/149** |
+| `IMailIntelligenceBackend` desacoplado | ✅ | Application; servidor funciona sin backend (Disabled default) |
+| LLM OpenAI-compatible | ✅ | `OpenAiCompatibleMailIntelligenceBackend` vía /v1/chat/completions |
+| Funciones avanzadas | ✅ | traducir, respuesta sugerida, borrador, clasificación LLM, búsqueda semántica |
+| Fallback local | ✅ | backend caído/endpoint falso → fallback (no rompe flujo); coseno local en semántica |
+| **Doble consentimiento §31** | ✅ | Backend solo si `Ai:Backend:Enabled` Y `Mailbox.AiConsent` (falso default) |
+| No enviar contenido sin consentimiento | ✅ | `MailIntelligenceFacade` gate; test `Consentimiento_por_defecto_falso` |
+| Activación explícita | ✅ | `Ai__Backend__Enabled` + Endpoint/ApiKey/Model |
+| Migración EF | ✅ | `AiConsent` (Mailbox.AiConsent) |
+
+## Ejecuciones reales FASE 8-avanzada
+
+### Build / Tests
+```
+Compilación correcta.  0 Errores
+AtlasMail.UnitTests.dll:  Correctas!  129/129 (0 error)
+AtlasMail.IntegrationTests.dll: Correctas!  20/20 (0 error)
+```
+
+### Tests relevantes (unit)
+```
+AiBackend: parsea respuesta OpenAI-compatible ("Hola") · endpoint falla → fallback local ·
+           semántica usa coseno local · Disabled no activo · consentimiento por defecto falso/revocable
+```
+
+### Nota de honestidad (FASE 8-avanzada)
+- El backend se probó con fake HttpMessageHandler (sin red). La integración con un LLM real requiere
+  `Ai:Backend:Endpoint`/`ApiKey` y queda como EXTERNAL (no se declara PROVEN sin un endpoint real).
+- El gate de consentimiento es por diseño: ningún contenido se envía a un proveedor sin config explícita
+  del operador + consentimiento del buzón (§31).
+
+## FASE 8 — IA local — Definition of Done (para referencia)
+
+| Requisito IA local (spec §31) | Resultado | Evidencia |
 |---|---|---|
 | `dotnet build -c Release` → 0 errores | ✅ | `0 errores` |
 | `dotnet test -c Release` → ALL PASS | ✅ | Unit **124/124** + Integration **20/20** = **144/144** |

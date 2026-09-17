@@ -64,6 +64,9 @@ public class Mailbox
     public long UsedBytes { get; set; }
     public DateTime? LastAccessAt { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    /// <summary>Consentimiento explícito del buzón para enviar su contenido a un backend de IA remoto
+    /// (FASE 8, §31). Falso por defecto: nunca se envía contenido a un proveedor sin este + `Ai:Backend:Enabled`.</summary>
+    public bool AiConsent { get; set; }
 
     [JsonIgnore] public string EmailAddress => $"{LocalPart}@{Domain?.Name}";
 

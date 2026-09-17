@@ -1,6 +1,7 @@
 using AtlasMail.Application;
 using AtlasMail.Application.Abstractions;
 using AtlasMail.Application.Services;
+using AtlasMail.Infrastructure.Ai;
 using AtlasMail.Infrastructure.Dns;
 using AtlasMail.Infrastructure.EmailAuth;
 using AtlasMail.Infrastructure.Imap;
@@ -53,6 +54,26 @@ public static class InfrastructureRegistrar
             config.GetValue("Ai:Enabled", false)
                 ? (IMailIntelligenceService)new LocalMailIntelligenceService()
                 : new DisabledMailIntelligence());
+        // FASE 8-avanzada: backend de IA remoto (OpenAI-compatible) SOLO con configuración explícita.
+        // El consentimiento por buzón (Mailbox.AiConsent) se aplica en MailIntelligenceFacade, nunca por defecto.
+        services.AddHttpClient(nameof(OpenAiCompatibleMailIntelligenceBackend));
+        services.AddSingleton<IMailIntelligenceBackend>(sp =>
+        {
+            var backendEnabled = config.GetValue("Ai:Backend:Enabled", false)
+                && !string.IsNullOrWhiteSpace(config["Ai:Backend:Endpoint"]);
+            if (!backendEnabled) return new DisabledMailIntelligenceBackend();
+            var httpClient = sp.GetRequiredService<IHttpClientFactory>()
+                .CreateClient(nameof(OpenAiCompatibleMailIntelligenceBackend));
+            httpClient.Timeout = TimeSpan.FromSeconds(config.GetValue("Ai:Backend:TimeoutSeconds", 30));
+            return new OpenAiCompatibleMailIntelligenceBackend(
+                httpClient,
+                config["Ai:Backend:Endpoint"]!,
+                config["Ai:Backend:ApiKey"],
+                config.GetValue("Ai:Backend:Model", "gpt-4o-mini"),
+                sp.GetRequiredService<ILoggerFactory>().CreateLogger("Ai.Backend"),
+                enabled: true);
+        });
+        services.AddScoped<MailIntelligenceFacade>();
 
         // FASE 2: entrega externa (DNS MX + política + rate limit)
         services.AddSingleton<IMxResolver>(sp =>

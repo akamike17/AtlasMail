@@ -105,7 +105,14 @@ Web → Infrastructure+Application+Protocols+Security+Worker.
   clasificación (General/Urgent/Finance/Marketing/Newsletter/Social/Notification/Security), phishing
   asistido (0-100 + señales, URLs IP/redirectors) y resumen extractivo. **No envía contenido a
   proveedores externos** (§31). Es asistencia, nunca decisión final de seguridad.
-- Activación: `Ai__Enabled=true`. Endpoint webmail `POST /api/personal/ai/analyze`.
+- `IMailIntelligenceBackend` (Application) + `Infrastructure/Ai/OpenAiCompatibleMailIntelligenceBackend`:
+  LLM remoto OpenAI-compatible para funciones avanzadas (traducir, respuesta sugerida, borrador,
+  clasificación LLM, búsqueda semántica con fallback coseno local).
+- **Doble consentimiento §31**: el backend nunca se usa sin `Ai:Backend:Enabled` (config explícita) Y
+  `Mailbox.AiConsent` (falso por defecto, vía `POST /api/personal/ai/consent`). `MailIntelligenceFacade`
+  garantiza este gate antes de enviar contenido a un proveedor.
+- Activación IA: `Ai__Enabled=true` (local) y `Ai__Backend__Enabled=true` + `Endpoint`/`ApiKey`/`Model` (remoto).
+- Migración EF `AiConsent`.
 
 ## Persistencia y almacenamiento de mensajes (spec §1)
 - **No** se guarda MIME completo en MySQL.

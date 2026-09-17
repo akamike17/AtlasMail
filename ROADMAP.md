@@ -128,9 +128,17 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 - `LocalMailIntelligenceService` (Security): prioridad (0-100), clasificación (General/Urgent/Finance/
   Marketing/Newsletter/Social/Notification/Security), riesgo de phishing asistido (0-100 + señales,
   URLs con IP/redirectors) y resumen extractivo. **100% local, no envía contenido a proveedores externos** (§31).
-- Activación explícita: `Ai__Enabled=true`. Endpoint webmail `POST /api/personal/ai/analyze`
-  (requiere sesión; si está deshabilitada responde `enabled:false`).
-- Tests: **unit 124/124** (+5: clasificación/prioridad/phishing/resumen/disabled) e **integration 20/20** (+1: disabled por defecto).
+- **Backend de IA (FASE 8-avanzada)**: `IMailIntelligenceBackend` + `OpenAiCompatibleMailIntelligenceBackend`
+  (endpoint OpenAI-compatible /v1/chat/completions, config `Ai:Backend:*`). Funciones avanzadas:
+  traducir, respuesta sugerida, redactar/borrador, clasificación LLM y búsqueda semántica (con fallback
+  coseno local). **Doble consentimiento §31**: backend SOLO si `Ai:Backend:Enabled` está en config explícita
+  Y el buzón dio consentimiento (`Mailbox.AiConsent`, falso por defecto; API `ai/consent`).
+- Activación explícita: `Ai__Enabled=true` (+ `Ai__Backend__Enabled=true` + `Endpoint`/`ApiKey`/`Model` para el backend).
+- Endpoints webmail (requieren sesión): `POST /api/personal/ai/analyze` (local), `ai/translate`,
+  `ai/suggest-reply`, `ai/draft`, `ai/classify`, `ai/semantic-search`, `GET/POST ai/consent`.
+- Migración EF `AiConsent` (columna `Mailbox.AiConsent`).
+- Tests: **unit 129/129** (+5: backend parsea OpenAI, fallback local, coseno semántico, disabled, consentimiento)
+  e **integration 20/20**.
 
 ## Principios permanentes (§53)
 NO open relay · NO pérdida silenciosa · NO doble entrega · NO passwords reversibles ·

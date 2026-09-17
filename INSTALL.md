@@ -123,10 +123,20 @@ Colaboración por webmail, con interoperabilidad estándar:
 
 ## 10. IA opcional (FASE 8)
 IA **local y desacoplada** (spec §31): el servidor funciona perfectamente sin ella. Por defecto deshabilitada.
-- `Ai__Enabled=true` activa `LocalMailIntelligenceService` (prioridad, clasificación, phishing asistido,
-  resumen extractivo — 100% local, no envía el contenido del correo a ningún proveedor externo).
-- Endpoint webmail (requiere sesión): `POST /api/personal/ai/analyze` con `{subject, body}`.
-- Si está deshabilitada, responde `{"enabled":false}`.
+- IA local (heurística, sin red): `Ai__Enabled=true`. Prioridad, clasificación, phishing asistido, resumen.
+- IA con backend LLM (**OpenAI-compatible**) para funciones avanzadas:
+  ```
+  export Ai__Enabled=true
+  export Ai__Backend__Enabled=true
+  export Ai__Backend__Endpoint='https://<proveedor>'
+  export Ai__Backend__ApiKey='<key>'
+  export Ai__Backend__Model='gpt-4o-mini'
+  ```
+- **Doble consentimiento** (§31): el backend sólo se usa si además el buzón dio consentimiento vía
+  `POST /api/personal/ai/consent` `{grant:true}` (por defecto falso). Ningún contenido se envía a un
+  proveedor sin ambas condiciones.
+- Endpoints webmail (requieren sesión): `POST /api/personal/ai/analyze` (local), `ai/translate`,
+  `ai/suggest-reply`, `ai/draft`, `ai/classify`, `ai/semantic-search`, `GET/POST ai/consent`.
 
 ## 11. IMAP (FASE 3)
 Servidor IMAP4rev1 (login, listar/select carpetas, listar y obtener mensajes, flags, mover, eliminar):

@@ -18,11 +18,12 @@ public class MailPersonalController : ControllerBase
     private readonly IContactService _contacts;
     private readonly ICurrentUser _current;
     private readonly AtlasMail.Application.Abstractions.IMailIntelligenceService _intelligence;
+    private readonly MailIntelligenceFacade _ai;
 
     public MailPersonalController(ICalendarService calendar, IContactService contacts, ICurrentUser current,
-        AtlasMail.Application.Abstractions.IMailIntelligenceService intelligence)
+        AtlasMail.Application.Abstractions.IMailIntelligenceService intelligence, MailIntelligenceFacade ai)
     {
-        _calendar = calendar; _contacts = contacts; _current = current; _intelligence = intelligence;
+        _calendar = calendar; _contacts = contacts; _current = current; _intelligence = intelligence; _ai = ai;
     }
 
     private async Task<long> MailboxId() => (await _current.GetMailboxIdAsync(CancellationToken.None))!.Value;
@@ -123,20 +124,80 @@ public class MailPersonalController : ControllerBase
     [HttpPost("ai/analyze")]
     public async Task<IActionResult> AiAnalyze([FromBody] AiAnalyzeRequest req)
     {
+        // Análisis local siempre disponible (no necesita buzón ni backend).
         if (!_intelligence.Enabled) return Ok(new { enabled = false });
-        // No accede a datos del buzón: analiza el texto enviado por el usuario. Sólo requiere sesión.
         var sb = new AtlasMail.Application.Abstractions.SubjectBody(req.Subject ?? "", req.Body ?? "");
-        var ph = _intelligence.AssessPhishing(sb);
         return Ok(new
         {
             enabled = true,
             priority = _intelligence.Priority(sb),
             category = _intelligence.Classify(sb).ToString(),
             summary = _intelligence.Summarize(sb),
-            phishing = ph.Score,
-            phishingSignals = ph.Signals
+            phishing = _intelligence.AssessPhishing(sb).Score
         });
+    }
+
+    // ---------- IA avanzada con backend (FASE 8, §31) — requiere buzón + consentimiento ----------
+
+    [HttpPost("ai/translate")]
+    public async Task<IActionResult> AiTranslate([FromBody] AiTranslateRequest req)
+    {
+        var mb = await MailboxId();
+        var r = await _ai.TranslateAsync(mb, new AtlasMail.Application.Abstractions.SubjectBody(req.Subject ?? "", req.Body ?? ""), req.ToLang ?? "es");
+        return Ok(new { text = r });
+    }
+
+    [HttpPost("ai/suggest-reply")]
+    public async Task<IActionResult> AiSuggestReply([FromBody] AiTranslateRequest req)
+    {
+        var mb = await MailboxId();
+        var r = await _ai.SuggestReplyAsync(mb, new AtlasMail.Application.Abstractions.SubjectBody(req.Subject ?? "", req.Body ?? ""));
+        return Ok(new { reply = r });
+    }
+
+    [HttpPost("ai/draft")]
+    public async Task<IActionResult> AiDraft([FromBody] AiDraftRequest req)
+    {
+        var mb = await MailboxId();
+        var r = await _ai.DraftAsync(mb, new AtlasMail.Application.Abstractions.SubjectBody(req.Subject ?? "", req.Body ?? ""), req.Tone);
+        return Ok(new { draft = r });
+    }
+
+    [HttpPost("ai/classify")]
+    public async Task<IActionResult> AiClassify([FromBody] AiTranslateRequest req)
+    {
+        var mb = await MailboxId();
+        var r = await _ai.ClassifyAsync(mb, new AtlasMail.Application.Abstractions.SubjectBody(req.Subject ?? "", req.Body ?? ""));
+        return Ok(new { category = r });
+    }
+
+    [HttpPost("ai/semantic-search")]
+    public async Task<IActionResult> AiSemanticSearch([FromBody] AiSemanticSearchRequest req)
+    {
+        var mb = await MailboxId();
+        var r = await _ai.SemanticSearchAsync(mb, req.Query ?? "", req.Docs ?? Array.Empty<string>(), req.TopK);
+        return Ok(new { indices = r.Indices, reason = r.Reason });
+    }
+
+    [HttpGet("ai/consent")]
+    public async Task<IActionResult> AiConsentGet()
+    {
+        var mb = await MailboxId();
+        var b = await _ai.HasConsentAsync(mb);
+        return Ok(new { consent = b, backend = _ai.BackendEnabled });
+    }
+
+    [HttpPost("ai/consent")]
+    public async Task<IActionResult> AiConsentSet([FromBody] AiConsentRequest req)
+    {
+        var mb = await MailboxId();
+        await _ai.SetConsentAsync(mb, req.Grant, CancellationToken.None);
+        return Ok(new { consent = req.Grant });
     }
 }
 
 public sealed record AiAnalyzeRequest(string? Subject, string? Body);
+public sealed record AiTranslateRequest(string? Subject, string? Body, string? ToLang);
+public sealed record AiDraftRequest(string? Subject, string? Body, string? Tone);
+public sealed record AiSemanticSearchRequest(string? Query, string[]? Docs, int TopK = 5);
+public sealed record AiConsentRequest(bool Grant);

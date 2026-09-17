@@ -68,6 +68,36 @@ public enum MailIntelligenceCategory
 public sealed record MailIntelligenceResult(
     int Priority, string Category, string Summary, int PhishingScore, IReadOnlyList<string> PhishingSignals);
 
+/// <summary>
+/// Backend de IA desacoplado (spec §31, FASE 8-avanzada). Abstrae un LLM externo (OpenAI-compatible
+/// u otro) para funciones avanzadas: traducir, redactar/respuesta sugerida, búsqueda semántica,
+/// resumen y clasificación LLM. El servidor funciona SIN backend (local heurística sigue activa);
+/// un backend remoto sólo se usa si está `Enabled` por configuración explícita Y el buzón dio
+/// consentimiento (`Mailbox.AiConsent`). NUNCA se envía el contenido a un proveedor sin ese
+/// doble consentimiento explícito (§31).
+/// </summary>
+public interface IMailIntelligenceBackend
+{
+    bool Enabled { get; }
+    string Provider { get; }
+
+    /// <summary>Resumen por LLM/toque de máxima calidad.</summary>
+    Task<string> SummarizeAsync(SubjectBody input, int maxChars, CancellationToken ct = default);
+    /// <summary>Traducción del cuerpo a un idioma destino (código ISO, ej. "es").</summary>
+    Task<string> TranslateAsync(SubjectBody input, string toLang, CancellationToken ct = default);
+    /// <summary>Redacta una respuesta sugerida al correo.</summary>
+    Task<string> SuggestReplyAsync(SubjectBody input, CancellationToken ct = default);
+    /// <summary>Redacta/reescribe un borrador del remitente (tono opcional).</summary>
+    Task<string> DraftAsync(SubjectBody input, string? tone, CancellationToken ct = default);
+    /// <summary>Clasificación LLM (categorías de negocio).</summary>
+    Task<string> ClassifyAsync(SubjectBody input, CancellationToken ct = default);
+    /// <summary>Búsqueda semántica: dado un query y una lista de fragmentos, devuelve los índices
+    /// de los más relevantes (como strings) y una razón. (Fallback: similaridad cosena local.)</summary>
+    Task<SemanticSearchResult> SemanticSearchAsync(string query, IReadOnlyList<string> docs, int topK = 5, CancellationToken ct = default);
+}
+
+public sealed record SemanticSearchResult(IReadOnlyList<string> Indices, string Reason);
+
 public sealed record MessageSearchQuery(
     string? Sender = null,
     string? Recipient = null,
