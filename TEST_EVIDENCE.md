@@ -1,8 +1,53 @@
-# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 + FASE 3 + FASE 4 + FASE 5 + FASE 6)
+# AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 a FASE 7)
 
-Fecha FASE 6: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
+Fecha FASE 7: 2026-09-16. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
 
-## FASE 6 — Definition of Done
+## FASE 7 — Definition of Done
+
+| Requisito FASE 7 (spec §32, §37-38) | Resultado | Evidencia |
+|---|---|---|
+| `dotnet build -c Release` → 0 errores | ✅ | `0 Advertencias / 0 Errores` |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **119/119** + Integration **19/19** = **138/138** |
+| Worker concurrente (HA) | ✅ | `Delivery:Concurrency` default 4; `Task.WhenAll` de claims; `SafeProcessAsync` |
+| Lease/claim transaccional + crash recovery | ✅ | Existing `ClaimNextAsync` atómico; lease caducado → reprocesable |
+| `IMetricsRegistry` (contadores/gauges/timers) | ✅ | Thread-safe; tests increment/gauge/timer/paralelo |
+| Métricas sin datos sensibles (§32) | ✅ | `metrics/text`: no contiene `password`/`secret` (test) |
+| Métricas de login, ingesta, entrega, storage | ✅ | `auth.*`, `mail.*`, `delivery_timing`, `storage.bytes` |
+| `GET /api/metrics` (JSON) | ✅ | Snapshot con login failures/successes, storage, queue, worker |
+| `GET /api/metrics/text` (Prometheus, sanitizado) | ✅ | Nombres `_` (sanitizados); sin secrets |
+| Heartbeat del worker | ✅ | `worker.last_heartbeat_unix` en snapshot |
+
+## Ejecuciones reales FASE 7
+
+### Build / Tests
+```
+Compilación correcta.  0 Advertencia(s)  0 Errores
+AtlasMail.UnitTests.dll:  Correctas!  119/119 (0 error)
+AtlasMail.IntegrationTests.dll: Correctas!  19/19 (0 error)
+```
+
+### Tests relevantes (unit)
+```
+MetricsRegistry: acumula · gauge+timer (count/suma_ms) · texto sanitiza nombres (_) · thread-safe 1000 parallel
+```
+
+### Smoke real (login + metrics, MySQL vivo)
+```
+login ok  -> {username:"admin", role:"SuperAdmin"}
+login bad -> {error:"Credenciales inválidas"}
+/api/metrics keys: auth.login_attempts, auth.login_failures(1), auth.login_successes(1),
+                   storage.bytes(0), queue.pending_total(0), worker.concurrency(4),
+                   worker.last_heartbeat_unix(set)
+/api/metrics/text: contiene "auth_login_failures "; NO contiene "password" ni "secret"
+```
+
+### Nota de honestidad (FASE 7)
+- La replicación física del message store (multi-nodo) queda declarada como integrar en un despliegue
+  multi-nodo; en esta fase la HA es de **workers concurrentes sobre la misma BD** + lease/claim atómico
+  (ya no hay pérdida ni doble entrega por carrera ni crash mientras la cola y el store sean compartidos).
+- Las métricas son agregados sin datos sensibles (por diseño §32); no se expone contenido ni direcciones.
+
+## FASE 6 — Definition of Done (para referencia)
 
 | Requisito FASE 6 (spec §14-16) | Resultado | Evidencia |
 |---|---|---|

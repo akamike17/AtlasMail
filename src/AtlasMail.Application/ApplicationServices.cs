@@ -65,6 +65,8 @@ public interface IOutboundQueueService
     Task<long> EnqueueAsync(string envelopeFrom, string envelopeTo, string storeKey, string? messageIdHeader,
         bool isLocal, CancellationToken ct = default);
     Task<DeliveryQueueItemClaim?> ClaimNextAsync(string workerId, CancellationToken ct = default);
+    /// <summary>Número de items pendientes/reintentables en la cola (observabilidad, sin datos sensibles).</summary>
+    Task<long> CountPendingAsync(CancellationToken ct = default);
     Task CompleteAsync(long queueItemId, string remoteResponse, CancellationToken ct = default);
     Task DeferAsync(long queueItemId, string error, string? remoteResponse, CancellationToken ct = default);
     Task FailAsync(long queueItemId, string error, string? remoteResponse, bool deadLetter, CancellationToken ct = default);

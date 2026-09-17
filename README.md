@@ -2,7 +2,7 @@
 
 Servidor empresarial de correo y colaboración self-hosted y multi-dominio (.NET 8 + MySQL).
 
-**Estado: Ciclo 1 + FASE 2 + FASE 3 + FASE 4 + FASE 5 + FASE 6 completadas** (SMTP + IMAP + entrega externa + SPF/DKIM/DMARC + antispam/quarantine/antimalware + calendar/contacts/groups).
+**Estado: Ciclo 1 + FASE 2-7 completadas** (SMTP + IMAP + entrega externa + SPF/DKIM/DMARC + antispam/quarantine/antimalware + calendar/contacts/groups + HA/observabilidad).
 
 ## Documentación
 - `ARCHITECTURE.md` — proyectos, pipeline SMTP, cola, seguridad, modelo multi-dominio.

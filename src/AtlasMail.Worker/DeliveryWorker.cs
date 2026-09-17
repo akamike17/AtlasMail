@@ -24,26 +24,54 @@ public class DeliveryWorker : BackgroundService
     private readonly string _workerId;
     private readonly string _hostname;
     private readonly int _loopIntervalMs;
+    private readonly int _concurrency;
 
     public DeliveryWorker(IServiceScopeFactory scopeFactory, ILogger<DeliveryWorker> logger,
-        string hostname = "atlasmail.local", int loopIntervalMs = 2000)
+        string hostname = "atlasmail.local", int loopIntervalMs = 2000, int concurrency = 4)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
         _workerId = "worker-" + Guid.NewGuid().ToString("N")[..8];
         _hostname = hostname;
         _loopIntervalMs = loopIntervalMs;
+        _concurrency = Math.Clamp(concurrency, 1, 64);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("DeliveryWorker {Worker} iniciado", _workerId);
+        _logger.LogInformation("DeliveryWorker {Worker} iniciado (concurrency={C})", _workerId, _concurrency);
+        using var metricScope = _scopeFactory.CreateScope();
+        var metrics = metricScope.ServiceProvider.GetService<IMetricsRegistry>();
+        var queueProbe = metricScope.ServiceProvider.GetService<IOutboundQueueService>();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                bool didWork = await ProcessOneAsync(stoppingToken);
-                if (!didWork) await Task.Delay(_loopIntervalMs, stoppingToken);
+                var tasks = new List<Task<bool>>(_concurrency);
+                for (int i = 0; i < _concurrency; i++)
+                {
+                    var t = SafeProcessAsync(stoppingToken);
+                    tasks.Add(t);
+                }
+                var results = await Task.WhenAll(tasks);
+
+                // gauge de profundidad de cola pendiente (sin datos sensibles)
+                if (metrics != null && queueProbe != null)
+                {
+                    try
+                    {
+                        metrics.SetGauge("queue.pending", await queueProbe.CountPendingAsync(stoppingToken));
+                        metrics.SetGauge("worker.concurrency", _concurrency);
+                        metrics.SetGauge("worker.last_heartbeat_unix",
+                            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+                    }
+                    catch { /* gauge opcional */ }
+                }
+
+                // si nada quedó por hacer, esperar antes de re-sondear (evita spin a alta velocidad)
+                if (results.Length == 0 || !results.Any(did => did))
+                    await Task.Delay(_loopIntervalMs, stoppingToken);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -55,6 +83,17 @@ public class DeliveryWorker : BackgroundService
         _logger.LogInformation("DeliveryWorker {Worker} detenido", _workerId);
     }
 
+    private async Task<bool> SafeProcessAsync(CancellationToken ct)
+    {
+        try { return await ProcessOneAsync(ct); }
+        catch (OperationCanceledException) { return false; }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error procesando un elemento de la cola");
+            return true; // hubo un claim; no apresurar el ciclo (reintenta por lease)
+        }
+    }
+
     private async Task<bool> ProcessOneAsync(CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateScope();
@@ -64,9 +103,12 @@ public class DeliveryWorker : BackgroundService
         var admin = scope.ServiceProvider.GetRequiredService<IAddressResolutionService>();
         var audit = scope.ServiceProvider.GetRequiredService<IAuditService>();
         var external = scope.ServiceProvider.GetService<ExternalDeliveryService>();
+        var metrics = scope.ServiceProvider.GetService<IMetricsRegistry>();
 
         var claim = await queue.ClaimNextAsync(_workerId, ct);
         if (claim == null) return false;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
 
         byte[] raw;
         try { raw = await store.ReadAsync(claim.StoreKey, ct); }
@@ -163,6 +205,21 @@ public class DeliveryWorker : BackgroundService
         }
         await audit.RecordAsync("Queue.ExternalDelivery", _workerId, null, null, "queue", claim.QueueItemId.ToString(),
             outcome.Kind.ToString(), outcome.RemoteResponse, ct);
+        sw.Stop();
+        // FASE 7: métricas de observabilidad (sin datos sensibles)
+        metrics?.Observe("delivery_timing", sw.Elapsed);
+        metrics?.Increment("mail.delivered");
+        switch (outcome.Kind)
+        {
+            case ExternalOutcomeKind.TemporaryFailure:
+            case ExternalOutcomeKind.NoMxEntry:
+                metrics?.Increment("mail.deferred");
+                break;
+            case ExternalOutcomeKind.PermanentFailure:
+            case ExternalOutcomeKind.PolicyDenied:
+                metrics?.Increment("mail.failed");
+                break;
+        }
         return true;
     }
 

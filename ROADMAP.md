@@ -4,8 +4,9 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 **FASE 2 completada** (SMTP robusto + entrega externa),
 **FASE 3 completada** (IMAP y clientes externos),
 **FASE 4 completada** (SPF/DKIM/DMARC),
-**FASE 5 completada** (antispam/quarantine/antimalware) y
-**FASE 6 completada** (calendar/contacts/groups).
+**FASE 5 completada** (antispam/quarantine/antimalware),
+**FASE 6 completada** (calendar/contacts/groups) y
+**FASE 7 completada** (alta disponibilidad / observabilidad avanzada).
 
 ## CICLO 1 — COMPLETADO ✅
 - Arquitectura modular (`src/*` + `tests/*`, .NET 8, MySQL/Pomelo).
@@ -107,8 +108,19 @@ Estado: **Ciclo 1 completado** (vertical slice funcional, §52 del spec maestro 
 - Tests: **unit 115/115** (+10: calendario CRUD/.ics roundtrip/rango, contactos CRUD/VCARD/CSV,
   grupos/expansión/loops/collisión) e **integration 18/18** (sin cambios, no rompe).
 
-## FASE 7 — Alta disponibilidad / replicación / observabilidad avanzada
-- Múltiples workers, reaprovechamiento de lease, replicación de message store, métricas/paneles.
+## FASE 7 — Alta disponibilidad / replicación / observabilidad avanzada ✅
+- **Worker concurrente**: `DeliveryWorker` ahora reclama hasta N items en paralelo (`Delivery:Concurrency`,
+  default 4), reutilizando el lease/claim transaccional de MySQL. `SafeProcessAsync` evita que una
+  excepción tumbe el lote. Crash recovery garantizado por lease caducado (item vuelve a procesable).
+- **Métricas (§32)**: `IMetricsRegistry` singleton thread-safe — contadores (messages received/spam/
+  quarantined/malware, delivered/deferred/failed, login attempts/failures/successes), gauges
+  (queue.pending, storage.bytes, worker.concurrency/messages, worker.last_heartbeat_unix) y timers
+  (delivery_timing). **Sin datos sensibles** (§32).
+- **Endpoints**: `GET /api/metrics` (JSON snapshot con backfill de storage/queue) y
+  `GET /api/metrics/text` (texto plano estilo Prometheus, nombres sanitizados).
+- **Login metrics**: AuthController registra intentos/fallos/éxitos.
+- Tests: **unit 119/119** (+4: metrics increment/gauge/timer, sanitización de nombres, thread-safe) e
+  **integration 19/19** (+1: /api/metrics con login fallido, storage/queue, texto sin password).
 
 ## FASE 8 — IA opcional y desacoplada
 - `IMailIntelligenceService` (Disabled por defecto): resumen, clasificación, prioridad, phishing asistido,

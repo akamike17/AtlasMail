@@ -112,7 +112,16 @@ Colaboración por webmail, con interoperabilidad estándar:
     entregando una copia a cada miembro con buzón local.
   - Políticas: envío interno/externo, moderación opcional, límite de miembros; anti-loop en la expansión.
 
-## 9. IMAP (FASE 3)
+## 9. Alta disponibilidad y observabilidad (FASE 7)
+- **Worker concurrente**: el `DeliveryWorker` procesa hasta `Delivery:Concurrency` items en paralelo
+  (default 4). Cada item usa un lease/claim atómico MySQL; si el worker muere, el lease caduca y el
+  item vuelve a procesable (sin pérdida). Puedes lanzar varios workers sobre la misma BD/store.
+- **Métricas (sin datos sensibles)**:
+  - `GET /api/metrics` → JSON con contadores/gauges/timers.
+  - `GET /api/metrics/text` → texto plano estilo Prometheus (nombres sanitizados).
+- Config: `Delivery__Concurrency=4`, `Delivery__Hostname=atlasmail.local`, `Delivery__LoopIntervalMs=2000`.
+
+## 10. IMAP (FASE 3)
 Servidor IMAP4rev1 (login, listar/select carpetas, listar y obtener mensajes, flags, mover, eliminar):
 
 ```bash
@@ -125,7 +134,7 @@ export Imap__MaxMessageBytes=52428800
 Clientes: host `mail.midominio.com`, puerto 143, IMAP normal (sin autenticación SSL aún; se puede añadir
 STARTTLS/IMAPS en una fase posterior). Autenticación con el **password del buzón** (mismo que SMTP AUTH).
 
-## 10. Ejecutar
+## 11. Ejecutar
 ```bash
 # Web (admin + webmail) — arranca también SMTP / IMAP (si enabled) y el worker de cola
 dotnet run --project src/AtlasMail.Web -c Release
@@ -137,7 +146,7 @@ dotnet run --project src/AtlasMail.Worker -c Release
 La Web levanta internamente el DeliveryWorker (cola). Para producción puede ejecutarse el Worker
 como proceso aparte apuntando a la misma DB/message-store.
 
-## 11. Verificación de humo
+## 12. Verificación de humo
 - `GET /health` → 200.
 - `GET /Account/Login` → 200 HTML.
 - Login del admin → redirect a `/Admin` (dashboard).

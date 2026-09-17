@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using AtlasMail.Application;
+using AtlasMail.Application.Abstractions;
 using AtlasMail.Application.Dtos;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -17,20 +18,30 @@ namespace AtlasMail.Web.Controllers;
 public class AuthController : ControllerBase
 {
     private readonly IAuthService _auth;
+    private readonly IMetricsRegistry _metrics;
 
-    public AuthController(IAuthService auth) { _auth = auth; }
+    public AuthController(IAuthService auth, IMetricsRegistry metrics) { _auth = auth; _metrics = metrics; }
 
     [HttpPost("login")]
     [AllowAnonymous]
     public async Task<IActionResult> Login([FromBody] LoginRequest req)
     {
+        _metrics.Increment("auth.login_attempts");
         if (_auth.IsBlocked(HttpContext.Connection.RemoteIpAddress?.ToString(), req.Username))
+        {
+            _metrics.Increment("auth.login_blocked");
             return Unauthorized(new { error = "Demasiados intentos. Intenta en unos minutos." });
+        }
 
         var result = await _auth.LoginAsync(req, HttpContext.Connection.RemoteIpAddress?.ToString(), Request.Headers.UserAgent.ToString());
-        if (!result.Success) return Unauthorized(new { error = result.Error });
+        if (!result.Success)
+        {
+            _metrics.Increment("auth.login_failures");
+            return Unauthorized(new { error = result.Error });
+        }
         if (result.Username == null) return Unauthorized(new { error = "error" });
         if (result.Role == null) return Unauthorized(new { error = "error" });
+        _metrics.Increment("auth.login_successes");
 
         var claims = new List<Claim>
         {

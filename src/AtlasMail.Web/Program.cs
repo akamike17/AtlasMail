@@ -102,7 +102,13 @@ builder.Services.AddSingleton<SmtpServer>(sp =>
         });
 });
 builder.Services.AddHostedService<SmtpHostedService>();
-builder.Services.AddHostedService<DeliveryWorker>();
+// FASE 7: worker concurrente (HA); concurrency configurable
+builder.Services.AddHostedService(sp => new DeliveryWorker(
+    sp.GetRequiredService<IServiceScopeFactory>(),
+    sp.GetRequiredService<ILogger<DeliveryWorker>>(),
+    builder.Configuration.GetValue("Delivery:Hostname", "atlasmail.local"),
+    builder.Configuration.GetValue("Delivery:LoopIntervalMs", 2000),
+    builder.Configuration.GetValue("Delivery:Concurrency", 4)));
 
 // FASE 3: servidor IMAP4rev1 (desacoplado del almacenamiento vía IMailboxBackend)
 // Siempre registrado; el flag Enabled decide si abre el listener (0 en CI).
@@ -202,6 +208,36 @@ app.MapGet("/api/health", (AtlasMail.Web.Smtp.IHealthCheckSubscriber health, Atl
                 deadLetter = counts.GetValueOrDefault("DeadLetter", 0)
             }
         });
+    }).AllowAnonymous();
+
+// FASE 7: métricas de observabilidad (spec §32). Backfill de gauges de storage desde el store,
+// sin exponer datos sensibles.
+app.MapGet("/api/metrics", async (AtlasMail.Application.Abstractions.IMetricsRegistry metrics,
+        AtlasMail.Application.Abstractions.IMessageStore store,
+        AtlasMail.Web.Smtp.IHealthCheckSubscriber health,
+        AtlasMail.Application.IOutboundQueueService queue,
+        CancellationToken ct) =>
+    {
+        try
+        {
+            metrics.SetGauge("storage.bytes", await store.TotalSizeAsync(ct));
+        }
+        catch { /* gauge opcional */ }
+        var counts = (await queue.ListAsync(take: 1000, ct: ct))
+            .GroupBy(q => q.State)
+            .ToDictionary(g => g.Key.ToString(), g => g.Count());
+        metrics.SetGauge("queue.pending_total", counts.GetValueOrDefault("Pending", 0));
+        metrics.SetGauge("queue.deferred_total", counts.GetValueOrDefault("Deferred", 0));
+        metrics.SetGauge("queue.failed_total", counts.GetValueOrDefault("Failed", 0));
+        return Results.Json(new { snapshot = metrics.Snapshot() });
+    }).AllowAnonymous();
+
+// Formato texto Prometheus (nombres sanitizados), sin datos sensibles.
+app.MapGet("/api/metrics/text", (AtlasMail.Application.Abstractions.IMetricsRegistry metrics,
+        AtlasMail.Application.Abstractions.IMessageStore store, CancellationToken ct) =>
+    {
+        try { metrics.SetGauge("storage.bytes", store.TotalSizeAsync(ct).GetAwaiter().GetResult()); } catch { }
+        return Results.Text(AtlasMail.Application.Abstractions.MetricsFormat.ToText(metrics.Snapshot()), "text/plain");
     }).AllowAnonymous();
 
 // Bootstrap: migraciones + admin inicial desde config (nunca password hardcoded en repo)

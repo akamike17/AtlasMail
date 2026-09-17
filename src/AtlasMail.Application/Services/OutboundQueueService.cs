@@ -66,6 +66,15 @@ public class OutboundQueueService : IOutboundQueueService
             candidate.StoreKey, candidate.MessageIdHeader);
     }
 
+    public async Task<long> CountPendingAsync(CancellationToken ct = default)
+    {
+        var now = DateTime.UtcNow;
+        return await _db.DeliveryQueue.AsNoTracking().LongCountAsync(q =>
+            q.State == DeliveryState.Pending ||
+            (q.State == DeliveryState.Deferred && q.NextAttemptAtUtc != null && q.NextAttemptAtUtc <= now) ||
+            (q.State == DeliveryState.Processing && q.LeaseExpiresAtUtc != null && q.LeaseExpiresAtUtc < now), ct);
+    }
+
     public async Task CompleteAsync(long queueItemId, string remoteResponse, CancellationToken ct = default)
     {
         var item = await _db.DeliveryQueue.FindAsync([queueItemId], ct) ?? throw new InvalidOperationException("Cola no encontrada");

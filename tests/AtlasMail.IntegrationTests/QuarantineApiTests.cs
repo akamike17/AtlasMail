@@ -37,4 +37,25 @@ public class QuarantineApiTests : IClassFixture<AtlasMailFactory>
         var blocked2 = await (await admin.GetAsync("/api/admin/quarantine/blocked")).Content.ReadAsStringAsync();
         Body(blocked2).GetArrayLength().Should().Be(0);
     }
+
+    [Fact]
+    public async Task Metrics_endpoint_expone_snapshot_con_auth()
+    {
+        var admin = await _factory.CreateAdminClientAsync();
+        // login inválido explícito: debe registrar auth_login_failures
+        var anon = _factory.CreateClient();
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "admin", password = "wrong-password" });
+
+        var json = await (await admin.GetAsync("/api/metrics")).Content.ReadAsStringAsync();
+        var snap = Body(json).GetProperty("snapshot");
+        snap.TryGetProperty("auth.login_failures", out _).Should().BeTrue();
+        snap.GetProperty("auth.login_failures").GetDouble().Should().BeGreaterThan(0);
+        snap.TryGetProperty("storage.bytes", out _).Should().BeTrue();
+        snap.TryGetProperty("queue.pending_total", out _).Should().BeTrue();
+
+        // formato texto Prometheus sanitizado
+        var text = await admin.GetStringAsync("/api/metrics/text");
+        text.Should().Contain("auth_login_failures ");
+        text.Should().NotContainAny("password", "secret");
+    }
 }

@@ -19,6 +19,7 @@ public static class InfrastructureRegistrar
 {
     public static IServiceCollection AddAtlasMailInfrastructure(this IServiceCollection services, IConfiguration config)
     {
+        services.AddSingleton<IMetricsRegistry, MetricsRegistry>();
         string conn = config.GetConnectionString("DefaultConnection")
             ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection no configurada");
         string storeRoot = config["Storage:Path"]

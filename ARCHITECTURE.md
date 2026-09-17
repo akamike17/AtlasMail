@@ -7,6 +7,7 @@ Servidor empresarial de correo y colaboración self-hosted. Multi-dominio.
 **FASE 4**: autenticación de correo SPF/DKIM/DMARC (recepción + firma DKIM en salida + admin DNS).
 **FASE 5**: antispam/quarantine/antimalware (scanner heurístico real, cuarentena administrable, blocklist).
 **FASE 6**: calendar/contacts/groups (calendario .ics, contactos VCARD/CSV, listas de distribución con políticas y anti-loop).
+**FASE 7**: HA/observabilidad avanzada (worker concurrente con lease/claim, métricas sin datos sensibles, /api/metrics).
 
 ## Stack
 - ASP.NET Core 8 (MVC + Razor + JS `fetch()`), Bootstrap local (sin CDN).
@@ -84,6 +85,18 @@ Web → Infrastructure+Application+Protocols+Security+Worker.
 - Endpoints: webmail `/api/personal/calendar[*]` y `/api/personal/contacts[*]` (aislados por mailboxId);
   admin `/api/admin/domain/{id}/groups[*]` y `/api/admin/groups/expand/...`.
 - Migración EF `CalendarContactsGroups`.
+
+## Alta disponibilidad y observabilidad (spec §32, §37-38) — FASE 7
+- **Worker concurrente**: `DeliveryWorker` procesa hasta `Delivery:Concurrency` (default 4) items en
+  paralelo, cada uno con su scope y lease/claim atómico sobre MySQL (`ClaimNextAsync`). Una excepción en
+  un item no aborta el lote (`SafeProcessAsync`). Crash recovery: lease caducado → el item vuelve a
+  procesable (sin pérdida ni doble entrega controlada).
+- **Métricas (`IMetricsRegistry`, §32)**: contadores + gauges + timers thread-safe, SIN datos sensibles
+  (no direcciones/asuntos/contenido). Registradas en ingesta (received/spam/quarantined/malware),
+  entrega (delivered/deferred/failed, delivery_timing), login (attempts/failures/successes) y worker
+  (queue.pending, storage.bytes, concurrency, last_heartbeat_unix).
+- **Endpoints**: `GET /api/metrics` (JSON con backfill de storage/queue) y `GET /api/metrics/text`
+  (texto plano Prometheus, nombres sanitizados). `/health` y `/api/health` existentes.
 
 ## Persistencia y almacenamiento de mensajes (spec §1)
 - **No** se guarda MIME completo en MySQL.

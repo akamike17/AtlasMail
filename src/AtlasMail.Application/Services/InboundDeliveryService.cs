@@ -27,22 +27,23 @@ public class InboundDeliveryService : IInboundDeliveryService
         private readonly IEmailAuthenticationService? _emailAuth;
         private readonly IQuarantineService? _quarantine;
         private readonly IGroupService? _groups;
+        private readonly IMetricsRegistry? _metrics;
         private readonly ILogger<InboundDeliveryService> _logger;
 
         public InboundDeliveryService(IApplicationDbContext db, IMessageStore store,
             IRuleEngine rules, IAttachmentScanner scanner, IAddressResolutionService resolver,
             IAuditService audit, IEmailAuthenticationService? emailAuth, IQuarantineService? quarantine,
-            IGroupService? groups, ILogger<InboundDeliveryService> logger)
+            IGroupService? groups, IMetricsRegistry? metrics, ILogger<InboundDeliveryService> logger)
         {
             _db = db; _store = store; _rules = rules;
-            _scanner = scanner; _resolver = resolver; _audit = audit; _emailAuth = emailAuth; _quarantine = quarantine; _groups = groups; _logger = logger;
+            _scanner = scanner; _resolver = resolver; _audit = audit; _emailAuth = emailAuth; _quarantine = quarantine; _groups = groups; _metrics = metrics; _logger = logger;
         }
 
         // Constructor legacy para tests que no dependen de auth de correo/cuarentena
         public InboundDeliveryService(IApplicationDbContext db, IMessageStore store,
             IRuleEngine rules, IAttachmentScanner scanner, IAddressResolutionService resolver,
             IAuditService audit, ILogger<InboundDeliveryService> logger)
-            : this(db, store, rules, scanner, resolver, audit, emailAuth: null, quarantine: null, groups: null, logger) { }
+            : this(db, store, rules, scanner, resolver, audit, emailAuth: null, quarantine: null, groups: null, metrics: null, logger) { }
 
     public async Task<InboundResult> IngestAsync(string envelopeFrom, string envelopeTo, byte[] rawMime,
         string? helo, string? clientIp, bool authenticated, string actor, CancellationToken ct = default)
@@ -191,6 +192,13 @@ public class InboundDeliveryService : IInboundDeliveryService
         await _audit.RecordAsync("Smtp.Ingest", actor, null, clientIp, "message", envelopeTo, "OK",
             $"decision={decision} score={totalScore:F1} auth=[{authSummary}]{(quarantineReason != null ? $" q={quarantineReason}" : "")} store={storeKey}", ct);
         _logger.LogInformation("Ingesta SMTP OK {To} de {From} decision={Decision}", envelopeTo, envelopeFrom, decision);
+
+        // FASE 7: métricas (sin datos sensibles)
+        _metrics?.Increment("mail.messages_received");
+        if (decision == SpamDecision.Spam) _metrics?.Increment("mail.spam");
+        if (decision == SpamDecision.Quarantine) _metrics?.Increment("mail.quarantined");
+        if (hasMalware) _metrics?.Increment("mail.malware");
+
         return decision == SpamDecision.Reject ? InboundResult.Rejected
             : decision == SpamDecision.Quarantine ? InboundResult.Quarantined
             : targetFolder == SystemFolder.Spam ? InboundResult.MovedToSpam

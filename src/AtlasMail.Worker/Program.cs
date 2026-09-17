@@ -13,7 +13,13 @@ builder.Services.AddScoped<IExternalMailSender>(sp =>
         sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>().CreateLogger<AtlasMail.Protocols.Smtp.SmtpClient>(),
         TimeSpan.FromSeconds(builder.Configuration.GetValue("Delivery:ConnectTimeoutSeconds", 60))));
 builder.Services.AddScoped<ExternalDeliveryService>();
-builder.Services.AddHostedService<DeliveryWorker>();
+// FASE 7: worker concurrente (HA); concurrency configurable
+builder.Services.AddHostedService(sp => new DeliveryWorker(
+    sp.GetRequiredService<IServiceScopeFactory>(),
+    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<DeliveryWorker>>(),
+    builder.Configuration.GetValue("Delivery:Hostname", "atlasmail.local"),
+    builder.Configuration.GetValue("Delivery:LoopIntervalMs", 2000),
+    builder.Configuration.GetValue("Delivery:Concurrency", 4)));
 
 var host = builder.Build();
 
