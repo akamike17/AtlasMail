@@ -13,6 +13,12 @@ public class FakeAppDbContext : DbContext, IApplicationDbContext
     public FakeAppDbContext(string dbName)
         : base(new DbContextOptionsBuilder<FakeAppDbContext>().UseInMemoryDatabase(dbName).Options) { }
 
+    // El proveedor InMemory no soporta transacciones reales; suprimir el aviso para que
+    // BeginTransactionAsync (usado por BackupService.ApplySnapshotAsync) sea un no-op y los
+    // tests unitarios de restore puedan ejercitar el flujo (sección 48).
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) =>
+        optionsBuilder.ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.InMemoryEventId.TransactionIgnoredWarning));
+
     public DbSet<MailDomain> Domains { get; set; } = null!;
     public DbSet<User> Users { get; set; } = null!;
     public DbSet<Mailbox> Mailboxes { get; set; } = null!;

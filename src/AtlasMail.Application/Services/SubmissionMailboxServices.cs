@@ -186,7 +186,12 @@ public class MailboxService : IMailboxService
         try
         {
             var parsed = MimeParser.Parse(raw);
-            body = parsed.HasHtml ? parsed.HtmlBody : parsed.PlainBody;
+            // Sanitización segura del HTML de correos (§seguridad): el webmail lo muestra con
+            // innerHTML (el HTML crudo de un tercero NUNCA se expone sin blanca). El texto plano
+            // se devuelve crudo: el cliente lo escapa al renderizar (escapeHtml).
+            body = parsed.HasHtml
+                ? AtlasMail.Domain.Mime.HtmlSanitizer.Sanitize(parsed.HtmlBody)
+                : parsed.PlainBody;
         }
         catch { body = "(no desplegable)"; }
 

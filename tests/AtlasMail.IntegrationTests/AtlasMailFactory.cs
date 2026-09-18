@@ -41,6 +41,10 @@ public class AtlasMailFactory : WebApplicationFactory<AtlasMail.Web.Program>
             Path.Combine(Path.GetTempPath(), "atlasmail_backup_" + Guid.NewGuid().ToString("N")));
         Environment.SetEnvironmentVariable("Smtp__Enabled", "0");
         Environment.SetEnvironmentVariable("Imap__Enabled", "0");
+        // Apagar el worker de fondo: de encendido, al dropear la BD temporal al final de la prueba
+        // el DeliveryWorker entra en spin infinito (erreintento "Unknown database"), agota el pool de
+        // MySQL e impide que el testhost salga. La entrega local E2E es síncrona (IngestAsync), no lo necesita.
+        Environment.SetEnvironmentVariable("Delivery__WorkerEnabled", "0");
         Environment.SetEnvironmentVariable("Delivery__DnsProbeEnabled", "false");
         Environment.SetEnvironmentVariable("Admin__Username", "admin");
         Environment.SetEnvironmentVariable("Admin__Password", "Atl4smail1!");

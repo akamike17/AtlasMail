@@ -13,7 +13,7 @@ namespace AtlasMail.Protocols.Imap;
 public sealed partial class ImapSession
 {
     private readonly IMailboxBackend _backend;
-    private readonly StreamWriter _writer;
+    private StreamWriter _writer;
     private readonly ImapServerOptions _options;
     private readonly ILogger _logger;
 
@@ -22,10 +22,16 @@ public sealed partial class ImapSession
     private ImapFolderSnapshot? _selected;
     private string _selectedName = string.Empty;
 
+    /// <summary>True cuando la sesión va cifrada (tras STARTTLS). Lo usa la puerta TLS de LOGIN.</summary>
+    public bool IsTls { get; set; }
+
     public ImapSession(IMailboxBackend backend, StreamWriter writer, ImapServerOptions options, ILogger logger)
     {
         _backend = backend; _writer = writer; _options = options; _logger = logger;
     }
+
+    /// <summary>Reemplaza el transporte tras STARTTLS (el nuevo StreamWriter va sobre el SslStream).</summary>
+    public void SetWriter(StreamWriter writer) => _writer = writer;
 
     private void LogWarning(string message) =>
         _logger.Log(LogLevel.Warning, 0, message, null, (s, _) => (string)s!);
@@ -98,7 +104,9 @@ public sealed partial class ImapSession
 
     private async Task CmdCapabilityAsync(string tag, CancellationToken ct)
     {
-        await WriteUntaggedAsync("CAPABILITY IMAP4rev1");
+        string caps = "IMAP4rev1";
+        if (_options.TlsCertificate != null && !IsTls) caps += " STARTTLS";
+        await WriteUntaggedAsync("CAPABILITY " + caps);
         await WriteTaggedOkAsync(tag, "CAPABILITY completed");
     }
 
@@ -112,6 +120,12 @@ public sealed partial class ImapSession
 
     private async Task CmdLoginAsync(string tag, string rest, CancellationToken ct)
     {
+        // §seguridad: si TLS es obligatorio, rechazar LOGIN en claro (los clientes deben negociar STARTTLS).
+        if (_options.RequireTlsForLogin && !IsTls)
+        {
+            await WriteNoAsync(tag, "LOGIN must be issued after STARTTLS (TLS required)");
+            return;
+        }
         if (_mailboxId.HasValue) { await WriteNoAsync(tag, "Already authenticated"); return; }
         var args = SplitArgs(rest, max: 3); // LOGIN user pass
         if (args.Count < 3)

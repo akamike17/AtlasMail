@@ -77,7 +77,8 @@ public sealed class ImapServer : IAsyncDisposable
         {
             client.NoDelay = true;
             client.ReceiveTimeout = (int)_options.CommandTimeout.TotalMilliseconds;
-            using var stream = client.GetStream();
+            var networkStream = client.GetStream();
+            Stream stream = networkStream;
             // UTF8 SIN BOM: un Byte-Order-Mark al inicio rompe la negociación con clientes IMAP reales.
             var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
             var reader = new StreamReader(stream, utf8NoBom);
@@ -100,6 +101,43 @@ public sealed class ImapServer : IAsyncDisposable
                 catch (Exception) { break; }
                 if (line == null) break;
 
+                // STARTTLS (RFC 3501 §6.2.1): lo maneja el servidor porque cambia el transporte.
+                if (TryStartTls(line, out var tlsTag))
+                {
+                    if (_options.TlsCertificate == null)
+                    {
+                        await writer.WriteLineAsync($"{tlsTag} BAD STARTTLS not available");
+                    }
+                    else if (session.IsTls)
+                    {
+                        await writer.WriteLineAsync($"{tlsTag} NO TLS already active");
+                    }
+                    else
+                    {
+                        await writer.WriteLineAsync($"{tlsTag} OK Begin TLS negotiation now");
+                        await writer.FlushAsync();
+                        try
+                        {
+                            var ssl = new System.Net.Security.SslStream(networkStream, leaveInnerStreamOpen: false, DoNotValidateClientCert);
+                            await ssl.AuthenticateAsServerAsync(_options.TlsCertificate, clientCertificateRequired: false,
+                                enabledSslProtocols: System.Security.Authentication.SslProtocols.Tls12 |
+                                                     System.Security.Authentication.SslProtocols.Tls13, checkCertificateRevocation: false);
+                            stream = ssl;
+                            reader = new StreamReader(stream, utf8NoBom);
+                            writer = new StreamWriter(stream, utf8NoBom) { NewLine = "\r\n", AutoFlush = true };
+                            session.SetWriter(writer);
+                            session.IsTls = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "IMAP STARTTLS falló con {Ip}", client.Client.RemoteEndPoint);
+                            await writer.WriteLineAsync($"{tlsTag} NO TLS negotiation failed");
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
                 // Manejo literal {N}\r\n: leer N bytes extra literalmente
                 string? continuation = null;
                 int litIdx = line.IndexOf("{", StringComparison.Ordinal);
@@ -109,6 +147,7 @@ public sealed class ImapServer : IAsyncDisposable
                     if (int.TryParse(numStr, out int n) && n <= _options.MaxLiteral)
                     {
                         await writer.WriteAsync("+ OK\r\n");
+                        await writer.FlushAsync();
                         var literal = await ReadExactlyAsync(stream, n, token);
                         continuation = Encoding.UTF8.GetString(literal, 0, literal.Length);
                     }
@@ -125,6 +164,21 @@ public sealed class ImapServer : IAsyncDisposable
             client.Close();
         }
     }
+
+    /// <summary>¿La línea es "&lt;tag&gt; STARTTLS"? Devuelve el tag si lo es.</summary>
+    private static bool TryStartTls(string line, out string tag)
+    {
+        tag = string.Empty;
+        int sp = line.IndexOf(' ');
+        string rest = sp < 0 ? line : line[(sp + 1)..].Trim();
+        if (!rest.Equals("STARTTLS", StringComparison.OrdinalIgnoreCase)) return false;
+        tag = sp < 0 ? "*" : line[..sp].Trim();
+        return true;
+    }
+
+    // El servidor no requiere certificado de cliente; aceptamos el (ausente) del cliente de correo.
+    private static bool DoNotValidateClientCert(object sender, System.Security.Cryptography.X509Certificates.X509Certificate? cert,
+        System.Security.Cryptography.X509Certificates.X509Chain? chain, System.Net.Security.SslPolicyErrors errors) => true;
 
     private static async Task<byte[]> ReadExactlyAsync(Stream stream, int count, CancellationToken ct)
     {

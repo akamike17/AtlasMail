@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -274,7 +276,12 @@ public class SmtpE2ETests : IAsyncLifetime
     {
         // §49 "SMTP command flooding": exceder MaxCommandsPerConnection cierra la conexión.
         var scopeFactory = _factory.Services.GetRequiredService<IServiceScopeFactory>();
-        _server = new SmtpServer(scopeFactory, new SmtpServerOptions { Port = 0, Hostname = "atlasmail.local", MaxCommandsPerConnection = 5 });
+        // MaxConnectionsPerIp alto: la cuenta de conexiones por IP es ESTÁTICA y compartida por todos los
+        // SmtpServer del proceso (host del factory + servers de tests). En una corrida conjunta el límite
+        // por defecto (20) se supera con las conexiones de otros tests a 127.0.0.1 y cierra la conexión con
+        // "Too many connections" ANTES de probar el flood de comandos. Este test sólo verifica el límite de
+        // COMANDOS, por lo que se aísla el de conexiones.
+        _server = new SmtpServer(scopeFactory, new SmtpServerOptions { Port = 0, Hostname = "atlasmail.local", MaxCommandsPerConnection = 5, MaxConnectionsPerIp = 100000 });
         _server.Start();
         int port = _server.EffectivePort;
 
@@ -282,18 +289,191 @@ public class SmtpE2ETests : IAsyncLifetime
         using (var c = new TcpClient())
         {
             await c.ConnectAsync("127.0.0.1", port).WaitAsync(TimeSpan.FromSeconds(5));
+            c.ReceiveTimeout = 3000; // no colgar si el cierre (RST) corta la lectura
             var reader = new StreamReader(c.GetStream(), Encoding.ASCII);
             var writer = new StreamWriter(c.GetStream(), Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
             await reader.ReadLineAsync(); // 220
-            for (int i = 0; i < 10; i++)
+            // Enviar comandos hasta que el servidor cierre la conexión por flood. Leer SIEMPRE
+            // (drenando el buffer) hasta ver el 421 o un EOF/cierre — no romper en el primer write.
+            for (int i = 0; i < 200; i++)
             {
-                await writer.WriteLineAsync("NOOP");
+                try { await writer.WriteLineAsync("NOOP"); }
+                catch (IOException) { /* el servidor ya cerró; drenar abajo */ }
                 string? line = null;
-                try { line = await reader.ReadLineAsync() ?? string.Empty; } catch (IOException) { line = string.Empty; }
-                if (!string.IsNullOrWhiteSpace(line)) lastReply = line;
-                if (lastReply.Contains("421")) break; // el servidor cerró la conexión
+                try { line = await reader.ReadLineAsync(); } catch (IOException) { line = null; }
+                catch (TimeoutException) { break; }
+                if (string.IsNullOrWhiteSpace(line)) break; // EOF / cierre
+                lastReply = line;
+                if (lastReply.Contains("421")) break;
             }
         }
         lastReply.Should().Contain("421");
+    }
+
+    [Fact]
+    public async Task DATA_infinito_sin_punto_se_cierra_por_timeout()
+    {
+        // §49/spec: un cliente que entra en DATA y sigue enviando sin mandar el "." final
+        // (stream infinito) debe terminar la sesión dentro del límite configurado, sin que la
+        // memoria crezca (el buffer se acota con MaxMessageBytes y luego se descarta).
+        _server = new SmtpServer(() => new DummySmtpHandler(),
+            new SmtpServerOptions
+            {
+                Port = 0,
+                Hostname = "atlasmail.local",
+                MaxMessageBytes = 1024,
+                DataTimeout = TimeSpan.FromSeconds(1)
+            });
+        _server.Start();
+        int port = _server.EffectivePort;
+
+        using (var c = new TcpClient())
+        {
+            await c.ConnectAsync("127.0.0.1", port).WaitAsync(TimeSpan.FromSeconds(5));
+            c.ReceiveTimeout = 5000;
+            var reader = new StreamReader(c.GetStream(), Encoding.ASCII);
+            var writer = new StreamWriter(c.GetStream(), Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+            await reader.ReadLineAsync(); // 220
+            await writer.WriteLineAsync("HELO test"); await reader.ReadLineAsync();
+            await writer.WriteLineAsync("MAIL FROM:<a@x.example>"); await reader.ReadLineAsync();
+            await writer.WriteLineAsync("RCPT TO:<b@y.example>"); await reader.ReadLineAsync();
+            await writer.WriteLineAsync("DATA"); await reader.ReadLineAsync(); // 354
+
+            // Enviar líneas indefinidamente SIN el ".": el servidor debe cerrar ~DataTimeout.
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            string? last = null;
+            bool closed = false;
+            while (sw.ElapsedMilliseconds < 4000)
+            {
+                await writer.WriteLineAsync("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"); // >MaxMessageBytes pronto
+                try
+                {
+                    // Leer con timeout: hereda ReceiveTimeout del socket.
+                    string? line = await reader.ReadLineAsync();
+                    if (line == null) { closed = true; break; }
+                    if (line.Contains("421")) { last = line; closed = true; break; }
+                }
+                catch (IOException) { closed = true; break; }
+                catch (System.OperationCanceledException) { closed = true; break; }
+            }
+            sw.Stop();
+
+            Assert.True(closed, $"la sesión debía cerrarse dentro del límite; última respuesta='{last}'");
+            Assert.True(sw.ElapsedMilliseconds < 4000, "cierre dentro del límite configurado");
+        }
+    }
+
+    [Fact]
+    public async Task STARTTLS_impide_AUTH_en_claro_y_permite_TLS()
+    {
+        using var cert = CreateSelfSignedCert();
+        _server = new SmtpServer(() => new DummySmtpHandler(),
+            new SmtpServerOptions
+            {
+                Port = 0,
+                Hostname = "atlasmail.local",
+                TlsCertificate = cert,
+                RequireTlsForAuth = true
+            });
+        _server.Start();
+        int port = _server.EffectivePort;
+
+        using (var c = new TcpClient())
+        {
+            await c.ConnectAsync("127.0.0.1", port).WaitAsync(TimeSpan.FromSeconds(5));
+            var stream = c.GetStream();
+            var reader = new StreamReader(stream, Encoding.ASCII);
+            var writer = new StreamWriter(stream, Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+
+            await reader.ReadLineAsync(); // 220
+            // EHLO pre-TLS: debe anunciar STARTTLS pero NO AUTH (TLS obligatorio para AUTH).
+            await writer.WriteLineAsync("EHLO client");
+            var ehlo1 = ReadEhlo(reader);
+            ehlo1.Should().Contain("STARTTLS");
+            ehlo1.Should().NotContain("AUTH", "no debe anunciarse AUTH en claro cuando TLS es obligatorio");
+
+            // AUTH en claro debe rechazarse con 530.
+            await writer.WriteLineAsync("AUTH PLAIN " + Convert.ToBase64String(Encoding.UTF8.GetBytes("\0u@x\0p")));
+            var deny = await reader.ReadLineAsync();
+            deny.Should().Contain("530");
+
+            // STARTTLS → 220 y negociar TLS real.
+            await writer.WriteLineAsync("STARTTLS");
+            var ok = await reader.ReadLineAsync();
+            ok.Should().Contain("220");
+            await writer.FlushAsync();
+
+            var ssl = new System.Net.Security.SslStream(stream, leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            await ssl.AuthenticateAsClientAsync("atlasmail.local");
+            var sreader = new StreamReader(ssl, Encoding.ASCII);
+            var swriter = new StreamWriter(ssl, Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+
+            // Tras STARTTLS el cliente repite EHLO: ahora AUTH SÍ se anuncia (canal cifrado).
+            await swriter.WriteLineAsync("EHLO client");
+            var ehlo2 = ReadEhlo(sreader);
+            ehlo2.Should().NotContain("STARTTLS", "no debe re-anunciarse STARTTLS ya activo");
+            ehlo2.Should().Contain("AUTH PLAIN LOGIN");
+        }
+    }
+
+    [Fact]
+    public async Task STARTTLS_sin_certificado_da_454()
+    {
+        _server = new SmtpServer(() => new DummySmtpHandler(),
+            new SmtpServerOptions { Port = 0, Hostname = "atlasmail.local" /* sin cert */ });
+        _server.Start();
+        int port = _server.EffectivePort;
+
+        using (var c = new TcpClient())
+        {
+            await c.ConnectAsync("127.0.0.1", port).WaitAsync(TimeSpan.FromSeconds(5));
+            var reader = new StreamReader(c.GetStream(), Encoding.ASCII);
+            var writer = new StreamWriter(c.GetStream(), Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+            await reader.ReadLineAsync(); // 220
+            await writer.WriteLineAsync("EHLO x"); ReadEhlo(reader);
+            await writer.WriteLineAsync("STARTTLS");
+            var rep = await reader.ReadLineAsync();
+            rep.Should().Contain("454");
+        }
+    }
+
+    private static string ReadEhlo(TextReader reader)
+    {
+        var sb = new StringBuilder();
+        while (true)
+        {
+            var l = reader.ReadLine() ?? "250 ";
+            sb.AppendLine(l);
+            if (l.Length < 4 || l[3] != '-') break; // última línea multilínea no termina en '-'
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Certificado self-signed efímero para los tests de STARTTLS (nunca para producción).</summary>
+    private static X509Certificate2 CreateSelfSignedCert()
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("CN=atlasmail.local", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddDnsName("atlasmail.local"); san.AddDnsName("localhost"); san.AddIpAddress(IPAddress.Loopback);
+        req.CertificateExtensions.Add(san.Build());
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+        byte[] pfx = cert.Export(X509ContentType.Pfx, "pw");
+        return new X509Certificate2(pfx, "pw",
+            X509KeyStorageFlags.Exportable | X509KeyStorageFlags.MachineKeySet);
+    }
+}
+
+/// <summary>Handler SMTP stub para tests de transporte (timeout de DATA, STARTTLS) sin BD.</summary>
+public class DummySmtpHandler : ISmtpMessageHandler
+{
+    public Task<string> ValidateEnvelopeAsync(string mailFrom, string rcptTo, SmtpSessionContext ctx, CancellationToken ct = default)
+        => Task.FromResult("250 2.1.0 OK");
+    public Task<string> HandleMessageAsync(string mailFrom, string rcptTo, byte[] rawMime, SmtpSessionContext ctx, CancellationToken ct = default)
+        => Task.FromResult("250 2.0.0 OK queued");
+    public Task<string> AuthenticateAsync(string username, string password, SmtpSessionContext ctx, CancellationToken ct = default)
+    {
+        ctx.Authenticated = true; ctx.AuthUsername = username;
+        return Task.FromResult("235 2.7.0 Authentication successful");
     }
 }

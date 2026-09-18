@@ -85,6 +85,10 @@ builder.Services.AddHealthChecks();
 
 // SMTP + worker de cola (hosted)
 builder.Services.AddSingleton<IHealthCheckSubscriber, HealthCheckSubscriber>();
+// Rate-limit SMTP AUTH por IP (spec §49): singleton compartido, ventana/límite configurables.
+builder.Services.AddSingleton(new AtlasMail.Domain.Rules.AuthRateLimiter(
+    builder.Configuration.GetValue("Smtp:AuthFailuresPerIpMax", 10),
+    TimeSpan.FromMinutes(builder.Configuration.GetValue("Smtp:AuthFailureWindowMinutes", 15))));
 builder.Services.AddScoped<SmtpInboundHandler>();
 builder.Services.AddScoped<ISmtpMessageHandler>(sp => sp.GetRequiredService<SmtpInboundHandler>());
 // SmtpServer SIEMPRE registrado (para que SmtpHostedService resuelva); el flag Enabled
@@ -93,22 +97,30 @@ builder.Services.AddSingleton<SmtpServer>(sp =>
 {
     var scopeFactory = sp.GetRequiredService<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>();
     return new SmtpServer(scopeFactory,
-        new SmtpServerOptions
-        {
-            Port = builder.Configuration.GetValue<int>("Smtp:Port", 2525),
-            Hostname = builder.Configuration["Smtp:Hostname"] ?? "atlasmail.local",
-            MaxMessageBytes = (int)builder.Configuration.GetValue<long>("Smtp:MaxMessageBytes", 50 * 1024 * 1024),
-            Enabled = builder.Configuration.GetValue<int>("Smtp:Enabled") == 1
-        });
-});
+            new SmtpServerOptions
+                        {
+                            Port = builder.Configuration.GetValue<int>("Smtp:Port", 2525),
+                            Hostname = builder.Configuration["Smtp:Hostname"] ?? "atlasmail.local",
+                            MaxMessageBytes = (int)builder.Configuration.GetValue<long>("Smtp:MaxMessageBytes", 50 * 1024 * 1024),
+                            Enabled = builder.Configuration.GetValue<int>("Smtp:Enabled") == 1,
+                            DataTimeout = TimeSpan.FromSeconds(builder.Configuration.GetValue("Smtp:DataTimeoutSeconds", 600)),
+                            TlsCertificate = LoadTlsCert(builder.Configuration, "Smtp"),
+                            RequireTlsForAuth = builder.Configuration.GetValue("Smtp:RequireTls", false)
+                        });
+            });
 builder.Services.AddHostedService<SmtpHostedService>();
-// FASE 7: worker concurrente (HA); concurrency configurable
-builder.Services.AddHostedService(sp => new DeliveryWorker(
-    sp.GetRequiredService<IServiceScopeFactory>(),
-    sp.GetRequiredService<ILogger<DeliveryWorker>>(),
-    builder.Configuration.GetValue("Delivery:Hostname", "atlasmail.local"),
-    builder.Configuration.GetValue("Delivery:LoopIntervalMs", 2000),
-    builder.Configuration.GetValue("Delivery:Concurrency", 4)));
+// FASE 7: worker concurrente (HA); concurrency configurable. Desactivable vía Delivery:WorkerEnabled
+// (por defecto activo en producción; los tests de integración lo apagan con 0 para no dejar un worker
+// de fondo reintentando contra una BD temporal que se dropea — impide el cierre limpio del testhost).
+if (builder.Configuration.GetValue<int>("Delivery:WorkerEnabled", 1) == 1)
+{
+    builder.Services.AddHostedService(sp => new DeliveryWorker(
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        sp.GetRequiredService<ILogger<DeliveryWorker>>(),
+        builder.Configuration.GetValue("Delivery:Hostname", "atlasmail.local"),
+        builder.Configuration.GetValue("Delivery:LoopIntervalMs", 2000),
+        builder.Configuration.GetValue("Delivery:Concurrency", 4)));
+}
 
 // FASE 3: servidor IMAP4rev1 (desacoplado del almacenamiento vía IMailboxBackend)
 // Siempre registrado; el flag Enabled decide si abre el listener (0 en CI).
@@ -116,13 +128,15 @@ builder.Services.AddSingleton<ImapServer>(sp =>
 {
     var scopeFactory = sp.GetRequiredService<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>();
     return new ImapServer(scopeFactory,
-        new ImapServerOptions
-        {
-            Port = builder.Configuration.GetValue<int>("Imap:Port", 143),
-            Hostname = builder.Configuration["Imap:Hostname"] ?? "atlasmail.local",
-            MaxMessageBytes = (int)builder.Configuration.GetValue<long>("Imap:MaxMessageBytes", 50 * 1024 * 1024),
-            Enabled = builder.Configuration.GetValue<int>("Imap:Enabled") == 1
-        },
+            new ImapServerOptions
+            {
+                Port = builder.Configuration.GetValue<int>("Imap:Port", 143),
+                Hostname = builder.Configuration["Imap:Hostname"] ?? "atlasmail.local",
+                MaxMessageBytes = (int)builder.Configuration.GetValue<long>("Imap:MaxMessageBytes", 50 * 1024 * 1024),
+                Enabled = builder.Configuration.GetValue<int>("Imap:Enabled") == 1,
+                TlsCertificate = LoadTlsCert(builder.Configuration, "Imap"),
+                RequireTlsForLogin = builder.Configuration.GetValue("Imap:RequireTls", false)
+            },
         sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>().CreateLogger<ImapServer>());
 });
 builder.Services.AddHostedService<ImapHostedService>();
@@ -251,5 +265,15 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.Run();
+
+// Carga opcional del certificado TLS del servidor (SMTP/IMAP STARTTLS). Si la ruta no está
+// configurada → null (sin STARTTLS). El password debe venir de entorno/secrets, nunca hardcoded.
+static System.Security.Cryptography.X509Certificates.X509Certificate2? LoadTlsCert(Microsoft.Extensions.Configuration.IConfiguration cfg, string section)
+{
+    string? path = cfg[$"{section}:TlsCertificatePath"];
+    if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+    string? password = cfg[$"{section}:TlsCertificatePassword"];
+    return new System.Security.Cryptography.X509Certificates.X509Certificate2(path, password ?? string.Empty);
+}
 
 // NOTA: el marcador `public partial class Program` vive en ProgramMarker.cs (namespace AtlasMail.Web)

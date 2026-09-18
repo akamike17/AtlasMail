@@ -41,6 +41,25 @@ Servidor SMTP real (`AtlasMail.Protocols.Smtp.SmtpServer`), state machine multih
   **operativo** en FASE 2, validando password de buzón (nunca reversible; PBKDF2).
 - Cliente (`SmtpClient`) admite STARTTLS **oportunista** (`StartTlsMode.Opportunistic`, por defecto),
   **obligatorio** (`Required`) o **desactivado** (`Disabled`, pruebas). AUTH PLAIN opcional si hay credenciales.
+- **Config TLS del servidor (FASE 9):** certificado vía `Smtp:TlsCertificatePath` / `Smtp:TlsCertificatePassword`
+  (idem `Imap:...`). Con `Smtp:RequireTls=1`:
+  - AUTH **no se anuncia** antes de negociar TLS (EHLO pre-TLS no muestra `AUTH`),
+  - AUTH en claro se rechaza con `530 5.7.0 Must issue a STARTTLS command first`,
+  - tras STARTTLS el cliente DEBE repetir EHLO (RFC 3207); entonces `AUTH` sí se anuncia.
+  Sin certificado → `454 4.7.0 TLS not available` (no se anuncia STARTTLS).
+  Análogo en IMAP con `Imap:RequireTls` → rechaza `LOGIN` en claro con `NO`.
+- **Anti-brute-force AUTH (FASE 9):** `AuthRateLimiter` per-IP (singleton, thread-safe sin lock global,
+  expira y elimina entradas). Máx intentos `Smtp:AuthFailuresPerIpMax` (default 10) en ventana
+  `Smtp:AuthFailureWindowMinutes` (default 15). Al bloquear devuelve `535 5.7.8 Too many authentication
+  failures` con backoff. Una IP bloqueada no afecta otras. Tras expirar la ventana se vuelve a permitir.
+
+## Límites de sesión SMTP (FASE 9)
+- `MaxMessageBytes` (default 50 MB): al exceder, DATA se descarta con `552 5.3.4` (nunca se entrega un MIME truncado).
+- `MaxCommandsPerConnection` (default 1000): flood de comandos → `421 4.7.0 Too many commands` y cierre.
+- `DataTimeout` (default 10 min, activable): límite ABSOLUTO de la fase DATA vía cancellation-token vinculado a la
+  sesión. Cubre tanto un stream infinito (sigue enviando sin `.`) como un cliente inactivo; al vencer, `421 4.4.2`
+  y cierre seguro de la sesión sin crecimiento de memoria.
+- `MaxConnectionsPerIp` (default 20): exceso → `421 Too many connections`.
 
 ## Cliente SMTP (outbound) — `SmtpClient` (FASE 2 operativo)
 - Resolución MX real (DnsClient) con fallback a registro A (RFC 5321 §5.1) en `DnsMxResolver`.

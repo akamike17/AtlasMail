@@ -25,24 +25,23 @@ public class SmtpInboundHandler : ISmtpMessageHandler
     private readonly IPasswordHasher _hasher;
     private readonly IGroupService? _groups;
     private readonly ILogger<SmtpInboundHandler> _logger;
-
-    // Rate-limit de brute-force SMTP AUTH por IP (spec §49 "brute-force login"). El path web
-    // usa AuthService (separado); aquí se protege el canal SMTP que no pasa por él.
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Queue<DateTime>> AuthFailures = new();
-    private const int MaxAuthFailuresPerIp = 10;
-    private static readonly TimeSpan AuthWindow = TimeSpan.FromMinutes(15);
+    // Rate-limit de brute-force SMTP AUTH por IP (spec §49). Estado thread-safe POR IP sin lock
+    // global; expira y elimina entradas antiguas; ventana/límite configurables (singleton DI).
+    private readonly AuthRateLimiter _authLimiter;
 
     public SmtpInboundHandler(IAddressResolutionService resolver, IInboundDeliveryService inbound,
-        IApplicationDbContext db, IPasswordHasher hasher, IGroupService? groups, ILogger<SmtpInboundHandler> logger)
+        IApplicationDbContext db, IPasswordHasher hasher, IGroupService? groups,
+        ILogger<SmtpInboundHandler> logger, AuthRateLimiter authLimiter)
     {
         _resolver = resolver; _inbound = inbound; _db = db; _hasher = hasher; _groups = groups; _logger = logger;
+        _authLimiter = authLimiter ?? new AuthRateLimiter();
     }
 
     public async Task<string> AuthenticateAsync(string username, string password, SmtpSessionContext ctx, CancellationToken ct = default)
     {
         // §49 brute-force: bloquear IP con demasiados intentos de AUTH fallidos recientes.
         var ip = ctx.ClientIp;
-        bool authAllowed = IsAuthAllowed(ip);
+        bool authAllowed = _authLimiter.IsAllowed(ip);
         if (!authAllowed)
         {
             _logger.LogWarning("SMTP AUTH bloqueado por rate-limit desde {Ip}", ip);
@@ -80,7 +79,7 @@ public class SmtpInboundHandler : ISmtpMessageHandler
 
         if (mb == null || string.IsNullOrEmpty(mb.PasswordHash))
         {
-            RecordAuthFailure(ip);
+            _authLimiter.RecordFailure(ip);
             _logger.LogInformation("SMTP AUTH falló {User}: buzón no encontrado o sin hash", username);
             return "535 5.7.8 Authentication credentials invalid";
         }
@@ -93,29 +92,9 @@ public class SmtpInboundHandler : ISmtpMessageHandler
             return "235 2.7.0 Authentication successful";
         }
 
-        RecordAuthFailure(ip);
+        _authLimiter.RecordFailure(ip);
         _logger.LogInformation("SMTP AUTH falló {User}: password incorrecto", username);
         return "535 5.7.8 Authentication credentials invalid";
-    }
-
-    private static bool IsAuthAllowed(string ip)
-    {
-        if (!AuthFailures.TryGetValue(ip, out var q)) return true;
-        lock (AuthFailures)
-        {
-            while (q.Count > 0 && DateTime.UtcNow - q.Peek() > AuthWindow) q.Dequeue();
-            return q.Count < MaxAuthFailuresPerIp;
-        }
-    }
-
-    private static void RecordAuthFailure(string ip)
-    {
-        lock (AuthFailures)
-        {
-            var q = AuthFailures.GetOrAdd(ip, _ => new Queue<DateTime>());
-            q.Enqueue(DateTime.UtcNow);
-            while (q.Count > 0 && DateTime.UtcNow - q.Peek() > AuthWindow) q.Dequeue();
-        }
     }
 
     public async Task<string> ValidateEnvelopeAsync(string mailFrom, string rcptTo, SmtpSessionContext ctx, CancellationToken ct = default)

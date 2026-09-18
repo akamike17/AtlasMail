@@ -173,4 +173,5 @@ public class StubStore : Application.Abstractions.IMessageStore
     public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
     public Task<long> TotalSizeAsync(CancellationToken ct = default) => Task.FromResult(0L);
     public Task SaveWithKeyAsync(string storeKey, byte[] rawMime, CancellationToken ct = default) => Task.CompletedTask;
+    public bool IsValidKey(string storeKey) => true;
 }

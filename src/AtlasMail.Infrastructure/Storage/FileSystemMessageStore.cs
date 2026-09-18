@@ -7,6 +7,9 @@ namespace AtlasMail.Infrastructure.Storage;
 /// Implementación local en filesystem de IMessageStore (sección 1).
 /// Cada mensaje se guarda como un archivo. Metadatos viven en MySQL.
 /// Preparado para reemplazar por ObjectStorageMessageStore sin tocar Application.
+/// Escribas atómicas (§48/§seguridad): nunca se escribe el archivo final directo; se escribe
+/// a un temporal en el MISMO filesystem y se publica con rename atómico. Ante una interrupción
+/// el MIME nunca queda truncado como archivo "válido" de la clave.
 /// </summary>
 public sealed class FileSystemMessageStore : IMessageStore
 {
@@ -29,11 +32,16 @@ public sealed class FileSystemMessageStore : IMessageStore
         return path;
     }
 
+    public bool IsValidKey(string storeKey)
+    {
+        try { Resolve(storeKey); return true; }
+        catch { return false; }
+    }
+
     public Task<string> SaveAsync(string messageId, byte[] rawMime, CancellationToken ct = default)
     {
         string key = Guid.NewGuid().ToString("N") + (string.IsNullOrWhiteSpace(messageId) ? "" : ".eml");
-        string path = Resolve(key);
-        lock (_lock) File.WriteAllBytes(path, rawMime);
+        WriteAtomic(Resolve(key), rawMime);
         return Task.FromResult(key);
     }
 
@@ -59,20 +67,52 @@ public sealed class FileSystemMessageStore : IMessageStore
 
     public Task SaveWithKeyAsync(string storeKey, byte[] rawMime, CancellationToken ct = default)
     {
-        lock (_lock) File.WriteAllBytes(Resolve(storeKey), rawMime);
+        // 1. Validar/Resolve la clave SIEMPRE (lanza InvalidOperationException si es traversal).
+        string path = Resolve(storeKey);
+        // 2. Escribir temporal en el mismo filesystem y publicar por rename atómico.
+        WriteAtomic(path, rawMime);
         return Task.CompletedTask;
+    }
+
+    /// <summary>Escribe <paramref name="data"/> de forma atómica: fichero temporal + flush a disco
+    /// + rename (reemplazo) sobre la ruta final. Si algo falla a medias, el archivo de la clave
+    /// nunca queda truncado: se borra el temporal y la ruta final retiene su contenido previo.</summary>
+    private void WriteAtomic(string path, byte[] data)
+    {
+        lock (_lock)
+        {
+            string tmp = path + ".tmp." + Guid.NewGuid().ToString("N");
+            try
+            {
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    fs.Write(data, 0, data.Length);
+                    fs.Flush(flushToDisk: true);
+                }
+                // Rename atómico (reemplaza) en el MISMO volumen — el lector nunca ve bytes a medias.
+                File.Move(tmp, path, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* best effort */ } }
+            }
+        }
     }
 
     public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken ct = default)
     {
         lock (_lock)
             return Task.FromResult<IReadOnlyList<string>>(
-                Directory.GetFiles(_root).Select(f => Path.GetFileName(f) ?? f).ToList());
+                Directory.GetFiles(_root)
+                    .Select(f => Path.GetFileName(f) ?? f)
+                    // excluir temporales de escritura atómica
+                    .Where(f => !f.Contains(".tmp."))
+                    .ToList());
     }
 
     public Task<long> TotalSizeAsync(CancellationToken ct = default)
     {
         lock (_lock)
-            return Task.FromResult(Directory.GetFiles(_root).Sum(f => new FileInfo(f).Length));
+            return Task.FromResult(Directory.GetFiles(_root).Where(f => !Path.GetFileName(f).Contains(".tmp.")).Sum(f => new FileInfo(f).Length));
     }
 }

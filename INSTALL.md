@@ -48,6 +48,19 @@ export Smtp__Enabled=1         # 0 lo apaga
 export Smtp__Port=2525
 export Smtp__Hostname='mail.midominio.com'
 ```
+Opciones de endurecimiento del servidor SMTP (FASE 9):
+```bash
+export Smtp__MaxMessageBytes=52428800          # límite de mensaje (MIME crudo)
+export Smtp__MaxCommandsPerConnection=1000     # flood de comandos → 421
+export Smtp__AuthFailuresPerIpMax=10           # brute-force AUTH por IP
+export Smtp__AuthFailureWindowMinutes=15       # ventana del contador anti-brute-force
+export Smtp__DataTimeout=600                   # segundos; límite absoluto de la fase DATA (stream infinito)
+export Smtp__TlsCertificatePath='/etc/ssl/mail.pfx'   # opcional; habilita STARTTLS
+export Smtp__TlsCertificatePassword=''         # password del PFX (vacío si no tiene)
+export Smtp__RequireTls=1                      # 1 = exige TLS antes de AUTH (rechaza 530 en claro)
+```
+Con `Smtp__RequireTls=1` y un certificado, el AUTH en claro se rechaza y no se anuncia hasta negociar STARTTLS.
+Sin certificado, STARTTLS no se anuncia y `RequireTls` no puede exigir AUTH cifrado (config no aceptable).
 
 ## 5. Entrega externa (FASE 2)
 La entrega a dominios externos resuelve MX real (DNS del sistema; DnsClient). Configuración opcional:
@@ -61,7 +74,11 @@ export Delivery__RateLimitPerDomainPerMinute=0   # 0 = sin límite (mensajes/min
 export Delivery__HeloName='mail.midominio.com'   # EHLO del MTA saliente
 export Delivery__DnsProbeEnabled=true            # health: resuelve MX periódicamente
 export Delivery__DnsProbeDomain='gmail.com'      # dominio que usa el probe de DNS
+export Delivery__WorkerEnabled=1                 # worker de cola de salida (0 desactiva; tests/CI sin cola)
 ```
+El worker de fondo (`DeliveryWorker`) es el que procesa la cola de salida con `Delivery:Concurrency` (default 4).
+En producción va activo (default 1); en pruebas/CI sin cola de entrega se apaga con `0` para no dejar un worker
+reintentando contra una BD ya descartada.
 
 Los fallos permanentes (5xx) generan un DSN/bounce al remitente **solo** si es un buzón local válido
 (anti-backscatter). La resolución DNS real no requiere configuración (usa los servidores del sistema).

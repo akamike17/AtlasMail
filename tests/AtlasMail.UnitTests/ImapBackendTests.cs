@@ -29,6 +29,7 @@ public sealed class MemoryMessageStore : IMessageStore
         Task.FromResult(_data.TryGetValue(storeKey, out var d) ? d : Array.Empty<byte>());
     public Task<bool> DeleteAsync(string storeKey, CancellationToken ct = default) => Task.FromResult(_data.Remove(storeKey));
     public Task SaveWithKeyAsync(string storeKey, byte[] rawMime, CancellationToken ct = default) { _data[storeKey] = rawMime; return Task.CompletedTask; }
+    public bool IsValidKey(string storeKey) => true;
     public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<string>>(_data.Keys.ToList());
     public Task<long> TotalSizeAsync(CancellationToken ct = default) => Task.FromResult(_data.Sum(kv => (long)kv.Value.Length));

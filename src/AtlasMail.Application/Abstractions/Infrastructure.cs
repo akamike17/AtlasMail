@@ -22,6 +22,10 @@ public interface IMessageStore
     /// <summary>Persiste el MIME crudo bajo una CLAVE EXPLÍCITA (restore de backup: debe coincidir
     /// con el StoreKey que referencia la DB). Si ya existe, sobrescribe.</summary>
     Task SaveWithKeyAsync(string storeKey, byte[] rawMime, CancellationToken ct = default);
+
+    /// <summary>¿Es la clave de almacenamiento válida y segura (sin path traversal)? El restore
+    /// lo usa para validar las claves de un manifest ANTES de publicar nada.</summary>
+    bool IsValidKey(string storeKey);
 }
 
 /// <summary>Motor de búsqueda de mensajes (sección 12). Aislamiento: solo mensajes autorizados.</summary>

@@ -19,4 +19,8 @@ public sealed class ImapServerOptions
     public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromMinutes(10);
     /// <summary>Capacidad literal {N} max de un comando (para buffers grandes de FETCH/APPEND).</summary>
     public int MaxLiteral { get; set; } = 50 * 1024 * 1024;
+    /// <summary>Certificado TLS del servidor IMAP (STARTTLS). Si es null, no se anuncia STARTTLS.</summary>
+    public System.Security.Cryptography.X509Certificates.X509Certificate2? TlsCertificate { get; set; }
+    /// <summary>Si true y hay certificado, exige TLS antes de permitir LOGIN (rechaza LOGIN en claro).</summary>
+    public bool RequireTlsForLogin { get; set; }
 }

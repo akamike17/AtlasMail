@@ -111,14 +111,34 @@ async function openMessage(id) {
     $('#messageList').removeClass('d-none').html(`
         <h5>${escapeHtml(m.subject)}</h5>
         <div class="text-muted small mb-2">De: ${escapeHtml(m.senderAddress)} · ${new Date(m.dateUtc).toLocaleString()}</div>
-        <div class="border-top pt-3" style="white-space:pre-wrap">${m.isHtml ? m.body : escapeHtml(m.body)}</div>
+        <div id="mailBodyPane"></div>
         ${m.attachments.length ? '<div class="mt-3"><strong>Adjuntos:</strong> ' + m.attachments.map(a => escapeHtml(a.fileName) + ' (' + fmtSize(a.sizeBytes) + ')' + ' — sha256:' + a.sha256.slice(0,12)).join('<br/>') + '</div>' : ''}
         <div class="mt-3">
             <button class="btn btn-sm btn-outline-primary" onclick="composeReply('${m.senderAddress}','${escapeAttr(m.subject)}','${m.id}')">Responder</button>
             <button class="btn btn-sm btn-outline-warning" onclick="setFlag(${m.id}, true)">Destacar</button>
             <button class="btn btn-sm btn-outline-danger" onclick="moveMessage(${m.id}, trashFolderId())">Eliminar</button>
         </div>`);
+    renderBody(m);
     $('#mailEmpty').addClass('d-none');
+}
+
+// El HTML del cuerpo sólo se muestra saneado por el servidor (HtmlSanitizer) y SIEMPRE
+// dentro de un <iframe sandbox> (sin allow-scripts/allow-top-navigation): ni el correo ni un
+// defecto aislado del sanitizador pueden ejecutar script en la sesión del webmail (XSS).
+function renderBody(m) {
+    const pane = $('#mailBodyPane').empty();
+    if (m.isHtml) {
+        const frame = $('<iframe>', {
+            sandbox: '',
+            style: 'width:100%;min-height:300px;border:1px solid #dee2e6;padding:8px',
+            scrolling: 'yes',
+            title: 'Cuerpo del mensaje'
+        });
+        frame.attr('srcdoc', m.body); // srcdoc (atributo) — jQuery escapa comillas/&<> correctamente
+        pane.append(frame);
+    } else {
+        pane.addClass('border-top pt-3').css('white-space', 'pre-wrap').text(m.body || '');
+    }
 }
 
 function trashFolderId() { const f = folders.find(x => x.systemName === 3); return f ? f.id : folders[0].id; }

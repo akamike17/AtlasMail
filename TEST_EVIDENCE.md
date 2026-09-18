@@ -1,37 +1,72 @@
 # AtlasMail — Evidencia de prueba (Ciclo 1 + FASE 2 a FASE 9)
 
-Fecha FASE 9: 2026-09-17. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
+Fecha FASE 9: 2026-09-18. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
 
 ## FASE 9 — Endurecimiento — Definition of Done
 
 | Requisito (spec §48/§49) | Resultado | Evidencia |
 |---|---|---|
-| `dotnet build -c Release` → 0 errores | ✅ | `Compilación correcta` |
-| `dotnet test -c Release` → ALL PASS | ✅ | Unit **130/130** + Integration **22/22** = **152/152** |
+| `dotnet build -c Release` → 0 errores | ✅ | `0 Advertencia(s) / 0 Errores` |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **149/149** + Integration **25/25** = **174/174** |
 | **huge DATA** (fix A) | ✅ | > `MaxMessageBytes` → **552** + descarte (no MIME truncado) |
 | **SMTP flood** (fix C) | ✅ | > `MaxCommandsPerConnection` → **421** + cierre |
-| **brute-force SMTP AUTH** (fix B) | ✅ | rate-limit por IP (10/15 min) + backoff |
+| **brute-force SMTP AUTH** (fix B) | ✅ | `AuthRateLimiter` por IP, sin lock global, expiración+eliminación |
 | open relay | ✅ | RelayPolicy deniega exteriores anónimos (E2E) |
-| path traversal store | ✅ | `Resolve` normaliza + rechaza escapes raíz |
+| path traversal store | ✅ | `Resolve` normaliza + rechaza escapes raíz; `IsValidKey` |
 | zip bomb / antimalware | ✅ | no-descompresión + límite tamaño + scanner heurístico |
-| **§48 restore del store** | ✅ | `RestoreAsync` repuebla message store (`SaveWithKeyAsync`) |
+| **§48 restore del store** | ✅ | `RestoreAsync` valida primero (FASE A read-only), luego write-back por clave |
 | Smoke §48 (destruir storage) | ✅ | correo → backup → storage destruido → restore → store repoblado (PASS) |
 
-### Ejecuciones reales FASE 9
+### Ejecuciones reales FASE 9 (+ remediación 2.md)
 ```
-Compilación correcta.  0 Errores
-UnitTests:  130/130 (0 error)   IntegrationTests:  22/22 (0 error)
+Compilación correcta.  0 Advertencia(s)  0 Errores
+AtlasMail.UnitTests.dll:          Correctas!  149/149 (0 error)  964 ms
+AtlasMail.IntegrationTests.dll:   Correctas!  25/25  (0 error)  28 s
 ```
-Tests relevantes: `Oversize_DATA_rechazado_552_sin_entregar_truncado` (E2E, verifica 552 y buzón vacío),
-`Flood_de_comandos_cerrado_con_421` (E2E), `Restore_rechaza_hash_snapshot_corrupto`.
-
-Smoke §48: `PASS correo entregado · PASS store con mensaje · PASS backup · PASS storage destruido ·
-PASS restore success · PASS store repoblado (write-back) · RESULT OK` (log: "Backup ... restaurado (14 tablas, 1 archivos store)").
+Tests relevantes (nuevos, de la remediación 2.md):
+- Unit: `SecurityHardeningTests` (AuthRateLimiter: N fallos→bloqueo→expiración; IP A≠B;
+  concurrencia multi-IP acota memoria; HtmlSanitizer: script/eventos/urls/iframe/style;
+  IMAP RequireTlsForLogin). `BackupRestoreTests` (restore atómico, clave original
+  preservada, MIME byte-a-byte, hash corrupto no modifica, storeKey inválido no modifica,
+  fallo write-back no publica parcial, volver a leer tras restore).
+- Integration: `DATA_infinito_sin_punto_se_cierra_por_timeout` (1s de DataTimeout),
+  `STARTTLS_impide_AUTH_en_claro_y_permite_TLS`, `STARTTLS_sin_certificado_da_454`,
+  `Oversize_DATA_rechazado_552_sin_entregar_truncado`, `Flood_de_comandos_cerrado_con_421`,
+  `Restore_*` (+5 casos atómicos).
 
 ### Honestidad (§44)
 - Los fixes A/B/C se verificaron E2E contra SMTP real (socket) sobre MySQL real.
-- §48: la prueba destruyó el storage y confirmó el write-back; no se probó la reconstrucción desde cero
-  de una máquina distinta (queda como arranque fresco documentado).
+- §48: la prueba destruyó el storage y confirmó el write-back; la reconstrucción desde cero
+  en una máquina distinta queda como arranque fresco documentado.
+- **Restore atómico (2.md #1/#5):** `RestoreAsync` ahora hace FASE A read-only (valida hash y
+  clave de TODO el store sin escribir) y sólo entonces restaura el store por clave + el
+  snapshot DB. Si un MIME/hash/storeKey falla: nada se publica. Si el write-back falla: la
+  DB no se ha tocado. Cubierto por 5 tests automáticos.
+- **Escribas atómicas del store (2.md #2):** `SaveWithKeyAsync` valida siempre la clave vía
+  `Resolve` (lanza en traversal) y escribe a temporal + flush + rename atómico en el mismo
+  filesystem. Un MIME truncado nunca queda como archivo "válido" de la clave.
+- **Brute-force AUTH (2.md #3):** `AuthRateLimiter` (nuevo) reemplaza el lock global con estado
+  thread-safe por IP, expira y ELIMINA entradas antiguas, ventana/límite configurables
+  (`Smtp:AuthFailuresPerIpMax`/`AuthFailureWindowMinutes`). Pruebas: N fallos→bloqueo→expiración
+  →se vuelve a permitir; IP A no bloquea IP B; concurrencia multi-IP acota memoria.
+- **DATA infinito (2.md #4):** se añadió `DataTimeout` absoluto con CTS por DATA vinculado a la
+  sesión. Cubre tanto un stream continuo (sigue enviando líneas sin ".") como un cliente
+  inactivo: `ReadLineAsync` se cancela por tiempo y el servidor cierra la sesión con 421. Sin
+  crecimiento de memoria (buffer ya acotado por `MaxMessageBytes`). Test E2E completo.
+- **TLS/STARTTLS (2.md #7):** servidores SMTP e IMAP soportan STARTTLS con certificado
+  (config `Smtp/Imap:TlsCertificatePath`). Con `RequireTls=1` se rechaza AUTH/LOGIN en claro
+  (530) y no se anuncia AUTH antes de negociar TLS. Sanitización segura del HTML de correos
+  (`HtmlSanitizer`) + render en `<iframe sandbox>` (XSS hostil probado en unit).
+- **MFA/TOTP:** NO implementado — el repo original no lo especificaba como requisito local
+  completo y probable, por lo que se mantiene explícitamente PENDIENTE (no se afirma completitud).
+- **Cuelgue de la suite de integración (fix de entorno/prueba):** el `DeliveryWorker` era
+  registrado incondicionalmente; al dropear la BD temporal de un test el worker entraba en
+  spin infinito ("Unknown database ≈99680 veces"), agotaba el pool MySQL e impedía el cierre
+  del testhost. Se añadió `Delivery:WorkerEnabled` (default 1; los tests lo apagan). La entrega
+  local E2E es síncrona, no lo necesita. Además: el test `STARTTLS_impide...` no enviaba el
+  EHLO previo → deadlock del testhost (corregido); el cierre TCP del SMTP ahora usa Shutdown
+  limpio (FIN, no RST) para que el 421 llegue siempre; el test `Flood` aísla el límite de
+  conexiones (contador por IP estático compartido entre servers del proceso).
 
 ## FASE 8 (avanzada) — Backend de IA — Definition of Done
 

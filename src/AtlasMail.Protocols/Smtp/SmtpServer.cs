@@ -97,14 +97,18 @@ public sealed class SmtpServer : IAsyncDisposable
     {
         string clientIp = ((IPEndPoint)client.Client.RemoteEndPoint!).Address.ToString();
         IServiceScope? scope = null;
+        // CTS del temporizador absoluto de la fase DATA; declarado aquí para que sea visible en el finally.
+        CancellationTokenSource? dataCts = null;
         try
         {
             client.NoDelay = true;
             client.ReceiveTimeout = (int)_options.CommandTimeout.TotalMilliseconds;
-            using var stream = client.GetStream();
+            NetworkStream networkStream = client.GetStream();
+            Stream stream = networkStream;
             var reader = new StreamReader(stream, Encoding.ASCII);
             var writer = new StreamWriter(stream, Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
             var ctx = new SmtpSessionContext { ClientIp = clientIp, ServerHostname = _options.Hostname };
+            bool tlsActive = false;
             // Handler scoped por conexión (para que DbContext scoped sea seguro)
             scope = _scopeFactory?.CreateScope();
             var handler = scope != null ? scope.ServiceProvider.GetRequiredService<ISmtpMessageHandler>() : _handlerDelegate!();
@@ -116,13 +120,32 @@ public sealed class SmtpServer : IAsyncDisposable
             var dataBuffer = new MemoryStream();
             bool inData = false;
             bool dataOverflow = false;
+            DateTime dataStarted = default;
+            // CTS vinculado a la sesión que vence tras DataTimeout durante la fase DATA. Permite que
+            // ReadLineAsync se cancele por tiempo aunque el cliente siga "inactivo" sin enviar líneas
+            // (cubre el stream DATA infinito). Se crea en cada DATA y se libera al salir.
+            // (declaración hoisted a nivel de método: ver `dataCts` arriba, junto a `scope`)
             int cmdCount = 0;
             var welcomeReceived = false;
+
+            void EndDataPhase()
+            {
+                dataCts?.Cancel();
+                dataCts?.Dispose();
+                dataCts = null;
+            }
 
             while (!token.IsCancellationRequested)
             {
                 string? line;
-                try { line = await reader.ReadLineAsync(token); }
+                try
+                {
+                    // Durante DATA, leer con el token del temporizador absoluto: si el cliente deja de
+                    // enviar líneas (o sigue enviando sin "."), el read se desbloquea al vencer
+                    // DataTimeout y cerramos la sesión — sin crecer en memoria (ya acotada por MaxMessageBytes).
+                    var readToken = inData && _options.DataTimeoutEnabled && dataCts != null ? dataCts.Token : token;
+                    line = await reader.ReadLineAsync(readToken);
+                }
                 catch (OperationCanceledException) { break; }
                 catch (Exception) { break; }
                 if (line == null) break; // EOF
@@ -131,6 +154,15 @@ public sealed class SmtpServer : IAsyncDisposable
 
                 if (inData)
                 {
+                    // Límite ABSOLUTO/temporizador de la fase DATA: un cliente puede seguir mandando
+                    // líneas sin el "." final (stream DATA infinito). Tras DataTimeout cerramos la
+                    // sesión SMTP de forma segura (421) — evita conexiones eternas consumiendo
+                    // recursos; la memoria ya está acotada por MaxMessageBytes en dataOverflow.
+                    if (_options.DataTimeoutEnabled && DateTime.UtcNow - dataStarted > _options.DataTimeout)
+                    {
+                        await writer.WriteAsync("421 4.4.2 Timeout receiving DATA, connection closing\r\n");
+                        break;
+                    }
                     // Fin de DATA = línea con ".".
                     if (line == "." || line == "\u0015.")
                     {
@@ -140,10 +172,12 @@ public sealed class SmtpServer : IAsyncDisposable
                             dataOverflow = false;
                             dataBuffer.SetLength(0);
                             mailFrom = null; rcptTo = null;
+                            EndDataPhase();
                             // NO entregar mensajes truncados: 552 y descartar (NO pérdida silenciosa, §49/§53).
                             await writer.WriteAsync("552 5.3.4 Message size exceeds fixed maximum\r\n");
                             continue;
                         }
+                        EndDataPhase();
                         var raw = dataBuffer.ToArray();
                         var result = await SafeHandleAsync(() => handler.HandleMessageAsync(mailFrom!, rcptTo!, raw, ctx, token));
                         await writer.WriteAsync(result + "\r\n");
@@ -176,7 +210,51 @@ public sealed class SmtpServer : IAsyncDisposable
                     // mantener orden: no restringir comandos; verificar límites abajo
                 }
 
+                // §seguridad: si TLS es obligatorio, rechazar AUTH en claro (antes de cualquier
+                // intercambio de credenciales). El cliente debe negociar STARTTLS primero.
+                if (_options.RequireTlsForAuth && !tlsActive && upper.StartsWith("AUTH"))
+                {
+                    await writer.WriteAsync("530 5.7.0 Must issue a STARTTLS command first\r\n");
+                    continue;
+                }
+
                 if (upper == "QUIT") { await writer.WriteAsync("221 Bye\r\n"); break; }
+                else if (upper == "STARTTLS")
+                {
+                    if (_options.TlsCertificate == null)
+                    {
+                        await writer.WriteAsync("454 4.7.0 TLS not available\r\n");
+                        continue;
+                    }
+                    if (tlsActive)
+                    {
+                        await writer.WriteAsync("503 5.5.1 TLS already active\r\n");
+                        continue;
+                    }
+                    await writer.WriteAsync("220 2.0.0 Ready to start TLS\r\n");
+                    try
+                    {
+                        await writer.FlushAsync(token);
+                        var ssl = new System.Net.Security.SslStream(networkStream, leaveInnerStreamOpen: false, DoNotValidateClientCert);
+                        await ssl.AuthenticateAsServerAsync(_options.TlsCertificate, clientCertificateRequired: false,
+                            enabledSslProtocols: System.Security.Authentication.SslProtocols.Tls12 |
+                                                 System.Security.Authentication.SslProtocols.Tls13, checkCertificateRevocation: false);
+                        stream = ssl;
+                        reader = new StreamReader(stream, Encoding.ASCII);
+                        writer = new StreamWriter(stream, Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+                        tlsActive = true;
+                        // El cliente DEBE repetir EHLO tras STARTTLS (RFC 3207). Reset estado de sobre.
+                        welcomeReceived = false;
+                        mailFrom = null; rcptTo = null;
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "STARTTLS falló con {Ip}", clientIp);
+                        await writer.WriteAsync("454 4.7.0 TLS negotiation failed\r\n");
+                        break;
+                    }
+                }
                 else if (upper == "EHLO" || upper.StartsWith("EHLO ") || upper == "HELO" || upper.StartsWith("HELO "))
                 {
                     // EHLO extensible (los clientes reales envían "EHLO hostname")
@@ -185,10 +263,16 @@ public sealed class SmtpServer : IAsyncDisposable
                     welcomeReceived = true;
                     if (ehlo)
                     {
+                        bool tlsAvailable = _options.TlsCertificate != null;
+                        bool advertiseAuth = tlsActive || !_options.RequireTlsForAuth;
                         await writer.WriteAsync($"250-{_options.Hostname} Hello\r\n");
                         await writer.WriteAsync("250-SIZE " + _options.MaxMessageBytes + "\r\n");
                         await writer.WriteAsync("250-8BITMIME\r\n");
-                        await writer.WriteAsync("250-AUTH PLAIN LOGIN\r\n");
+                        if (tlsAvailable && !tlsActive)
+                            await writer.WriteAsync("250-STARTTLS\r\n");
+                        // No anunciar AUTH en claro cuando TLS es obligatorio y aún no se negoció.
+                        if (advertiseAuth)
+                            await writer.WriteAsync("250-AUTH PLAIN LOGIN\r\n");
                         await writer.WriteAsync("250-ENHANCEDSTATUSCODES\r\n");
                         await writer.WriteAsync("250 HELP\r\n");
                     }
@@ -289,11 +373,18 @@ public sealed class SmtpServer : IAsyncDisposable
                     if (rcptTo == null) { await writer.WriteAsync("503 Need RCPT TO first\r\n"); continue; }
                     dataBuffer = new MemoryStream();
                     inData = true;
+                    dataStarted = DateTime.UtcNow; // arrancar el temporizador absoluto de la fase DATA
+                    dataOverflow = false;
+                    // Temporizador absoluto de la fase DATA: cancela el read si el cliente no termina.
+                    dataCts?.Dispose();
+                    dataCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    if (_options.DataTimeoutEnabled) dataCts.CancelAfter(_options.DataTimeout);
                     await writer.WriteAsync("354 End data with <CR><LF>.<CR><LF>\r\n");
                 }
                 else if (upper == "RSET")
                 {
                     mailFrom = null; rcptTo = null; inData = false; dataBuffer = new MemoryStream();
+                    EndDataPhase();
                     await writer.WriteAsync("250 OK\r\n");
                 }
                 else if (upper == "NOOP")
@@ -320,6 +411,12 @@ public sealed class SmtpServer : IAsyncDisposable
         catch (Exception ex) { _logger.LogDebug(ex, "Conexión SMTP cerrada por {Ip}", clientIp); }
         finally
         {
+            dataCts?.Cancel();
+            dataCts?.Dispose();
+            // Cierre TCP limpio: enviar FIN (no RST) para que la última respuesta (p.ej. 421 tras flood)
+            // llegue al cliente. Un Close() directo con datos sin leer puede disparar un RST que
+            // descarta el 421 pendiente y hace intermitente el cierre por flood.
+            try { if (client.Connected && client.Client.Connected) client.Client.Shutdown(SocketShutdown.Both); } catch { /* best effort */ }
             scope?.Dispose();
             client.Close();
         }
@@ -377,6 +474,10 @@ public sealed class SmtpServer : IAsyncDisposable
 
     private static readonly Dictionary<string, Queue<DateTime>> _conns = new();
     private static readonly object _connLock = new();
+
+    // El servidor no requiere certificado de cliente; aceptamos el (ausente) del cliente de correo.
+    private static bool DoNotValidateClientCert(object sender, System.Security.Cryptography.X509Certificates.X509Certificate? cert,
+        System.Security.Cryptography.X509Certificates.X509Chain? chain, System.Net.Security.SslPolicyErrors errors) => true;
     private int CountRecentConnections(string ip)
     {
         lock (_connLock)
@@ -408,4 +509,14 @@ public sealed class SmtpServerOptions
     public int MaxCommandsPerConnection { get; set; } = 1000;
     public int Backlog { get; set; } = 100;
     public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromMinutes(5);
+    /// <summary>Límite absoluto de la fase DATA: un cliente que siga enviando sin el "." final
+    /// (stream infinito) cierra la sesión con 421 al superar este tiempo. Requiere activar
+    /// <see cref="DataTimeoutEnabled"/>. La memoria ya queda acotada por <see cref="MaxMessageBytes"/>.</summary>
+    public TimeSpan DataTimeout { get; set; } = TimeSpan.FromMinutes(10);
+    /// <summary>Activa/desactiva el temporizador absoluto de DATA (por defecto activo).</summary>
+    public bool DataTimeoutEnabled { get; set; } = true;
+    /// <summary>Certificado TLS del servidor (STARTTLS). Si es null, no se anuncia STARTTLS.</summary>
+    public System.Security.Cryptography.X509Certificates.X509Certificate2? TlsCertificate { get; set; }
+    /// <summary>Si true y hay certificado, exige TLS antes de permitir AUTH (rechaza AUTH en claro).</summary>
+    public bool RequireTlsForAuth { get; set; }
 }

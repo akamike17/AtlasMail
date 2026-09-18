@@ -109,32 +109,89 @@ public class BackupService : IBackupService
         if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
             return new RestoreResult(false, $"Hash del snapshot no coincide (esperado {expected}, real {actual})", null, 0);
 
-        // 3. Restore store (validar hash de cada archivo antes de confirmar)
-        foreach (var f in Directory.GetFiles(Path.Combine(dir, "store")))
+        // 3. FASE A (read-only): cargar y validar TODO el store del manifest — hash de cada archivo
+        //    y validez de cada clave — ANTES de publicar nada. Si un MIME/hash/storeKey falla,
+        //    ningún destino (BD ni store) se ha tocado todavía.
+        List<(string Key, byte[] Data)> storeData;
+        try
         {
-            var data = await File.ReadAllBytesAsync(f, ct);
-            string fileSha = ComputeSha256File(f);
-            string expectedSha = GetStoreSha(manifestPath, Path.GetFileName(f));
-            if (!string.Equals(fileSha, expectedSha, StringComparison.OrdinalIgnoreCase))
-                return new RestoreResult(false, $"Hash del archivo store {Path.GetFileName(f)} no coincide", null, 0);
+            storeData = await LoadAndValidateStoreAsync(manifestPath, dir, ct);
+        }
+        catch (InvalidDataException ex)
+        {
+            return new RestoreResult(false, ex.Message, null, 0);
         }
 
-        // 4. Restore DB snapshot (identificación por URL del método — implementación segura en snapshot)
-        int restored = await ApplySnapshotAsync(snapshotPath, ct);
+        // 4. Restore del store PRIMERO (escrituras atómicas por clave). Si cualquier write-back
+        //    falla a medias, la DB NO se ha restaurado aún → nunca queda publicada apuntando a un
+        //    store parcial.
+        try
+        {
+            foreach (var (key, data) in storeData)
+                await _store.SaveWithKeyAsync(key, data, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Restore store falló antes de tocar la DB (nada publicado): backup {Id}", backupId);
+            await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "FAIL", "store write-back falló; DB intacta", ct);
+            return new RestoreResult(false, "Fallo restaurando el message store; la DB no se modificó: " + ex.Message, null, 0);
+        }
 
-        // 5. Restore message store: escribir de vuelta cada archivo con su CLAVE ORIGINAL
-        //    (debe coincidir con el StoreKey referenciado por la DB). §48 backup/restore completo.
-        var storeMap = GetStoreKeyMap(manifestPath);
-        foreach (var (key, file) in storeMap)
+        // 5. Restore DB snapshot (transaccional, identificación por URL del método).
+        int restored;
+        try
+        {
+            restored = await ApplySnapshotAsync(snapshotPath, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Restore DB falló tras restaurar store (store extra, DB intacta): backup {Id}", backupId);
+            await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "FAIL", "snapshot DB falló; DB no modificada", ct);
+            return new RestoreResult(false, "Fallo restaurando el snapshot de la DB: " + ex.Message, null, 0);
+        }
+
+        await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "OK", $"tables={restored} store={storeData.Count}", ct);
+        _logger.LogInformation("Backup {Id} restaurado ({Restored} tablas, {Store} archivos store)", backupId, restored, storeData.Count);
+        return new RestoreResult(true, null, backupId, restored);
+    }
+
+    /// <summary>Carga y valida todo el message store referenciado por el manifest: cada archivo
+    /// debe existir y coincidir su hash, y cada clave debe ser válida para el store (sin traversal).
+    /// Lanza <see cref="InvalidDataException"/> con el motivo si algo no es restaurable. NO escribe nada.</summary>
+    private async Task<List<(string Key, byte[] Data)>> LoadAndValidateStoreAsync(string manifestPath, string dir, CancellationToken ct)
+    {
+        var result = new List<(string, byte[])>();
+        var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+
+        // storeFiles[].file → hash   y   storeFiles[].key → file
+        var hashByFile = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var keyByFile = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in manifest.RootElement.GetProperty("storeFiles").EnumerateArray())
+        {
+            string file = f.GetProperty("file").GetString() ?? string.Empty;
+            string key = f.GetProperty("key").GetString() ?? string.Empty;
+            string sha = f.GetProperty("sha256").GetString() ?? string.Empty;
+            hashByFile[file] = sha;
+            keyByFile[file] = key;
+        }
+
+        foreach (var (file, sha) in hashByFile)
         {
             string filePath = Path.Combine(dir, "store", file);
-            byte[] data = await File.ReadAllBytesAsync(filePath, ct);
-            await _store.SaveWithKeyAsync(key, data, ct);
-        }
+            if (!File.Exists(filePath))
+                throw new InvalidDataException($"Archivo store {file} del manifest no existe en el backup");
 
-        await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "OK", $"tables={restored} store={storeMap.Count}", ct);
-        _logger.LogInformation("Backup {Id} restaurado ({Restored} tablas, {Store} archivos store)", backupId, restored, storeMap.Count);
-        return new RestoreResult(true, null, backupId, restored);
+            string actual = ComputeSha256File(filePath);
+            if (!string.Equals(actual, sha, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"Hash del archivo store {file} no coincide ({actual} != {sha})");
+
+            string key = keyByFile[file];
+            if (!_store.IsValidKey(key))
+                throw new InvalidDataException($"Clave de almacenamiento inválida (posible path traversal): {key}");
+
+            result.Add((key, await File.ReadAllBytesAsync(filePath, ct)));
+        }
+        return result;
     }
 
     private async Task<List<DbSnapshotRow>> CaptureSnapshotAsync(CancellationToken ct)
@@ -222,24 +279,5 @@ public class BackupService : IBackupService
     {
         using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
         return doc.RootElement.GetProperty("dbSnapshot").GetProperty("sha256").GetString()!;
-    }
-
-    private static string GetStoreSha(string manifestPath, string fileName)
-    {
-        using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
-        foreach (var f in doc.RootElement.GetProperty("storeFiles").EnumerateArray())
-            if (f.GetProperty("file").GetString() == fileName)
-                return f.GetProperty("sha256").GetString()!;
-        return string.Empty;
-    }
-
-    /// <summary>Mapea clave original (storeKey) → nombre de archivo en el backup, desde el manifest.</summary>
-    private static List<(string Key, string File)> GetStoreKeyMap(string manifestPath)
-    {
-        var result = new List<(string, string)>();
-        using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
-        foreach (var f in doc.RootElement.GetProperty("storeFiles").EnumerateArray())
-            result.Add((f.GetProperty("key").GetString()!, f.GetProperty("file").GetString()!));
-        return result;
     }
 }
