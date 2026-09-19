@@ -339,26 +339,33 @@ public class SmtpE2ETests : IAsyncLifetime
             await writer.WriteLineAsync("RCPT TO:<b@y.example>"); await reader.ReadLineAsync();
             await writer.WriteLineAsync("DATA"); await reader.ReadLineAsync(); // 354
 
-            // Enviar líneas indefinidamente SIN el ".": el servidor debe cerrar ~DataTimeout.
+            // §3.md/Fix 4: enviar líneas prolijamente SIN el "." — el servidor debe responder el contrato
+            // EXACTO "421 4.4.2 Timeout receiving DATA, connection closing" (~DataTimeout) y cerrar. No
+            // basta con que cierre: debe emitir el 421 4.4.2 verificable.
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            string? last = null;
-            bool closed = false;
+            string? last421 = null;
+            string? lastAny = null;
+            bool got421 = false;
             while (sw.ElapsedMilliseconds < 4000)
             {
-                await writer.WriteLineAsync("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"); // >MaxMessageBytes pronto
-                try
+                try { await writer.WriteLineAsync("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"); }
+                catch (IOException) { break; } // servidor cerró tras el 421; drenar debajo
+                string? line = null;
+                try { line = await reader.ReadLineAsync(); } catch (IOException) { break; }
+                catch (TimeoutException) { break; }
+                if (string.IsNullOrWhiteSpace(line)) break; // EOF / cierre
+                lastAny = line;
+                if (line.Contains("421 4.4.2 Timeout receiving DATA"))
                 {
-                    // Leer con timeout: hereda ReceiveTimeout del socket.
-                    string? line = await reader.ReadLineAsync();
-                    if (line == null) { closed = true; break; }
-                    if (line.Contains("421")) { last = line; closed = true; break; }
+                    last421 = line;
+                    got421 = true;
+                    break;
                 }
-                catch (IOException) { closed = true; break; }
-                catch (System.OperationCanceledException) { closed = true; break; }
             }
             sw.Stop();
 
-            Assert.True(closed, $"la sesión debía cerrarse dentro del límite; última respuesta='{last}'");
+            Assert.True(got421, $"debió recibir '421 4.4.2 Timeout receiving DATA' dentro del límite; última respuesta='{lastAny}'");
+            last421.Should().Contain("421 4.4.2 Timeout receiving DATA");
             Assert.True(sw.ElapsedMilliseconds < 4000, "cierre dentro del límite configurado");
         }
     }

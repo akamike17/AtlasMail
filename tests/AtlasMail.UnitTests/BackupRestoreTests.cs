@@ -172,6 +172,38 @@ public class BackupRestoreTests
         Assert.Contains("no encontrado", res.Error, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void IsValidKey_es_estricto_la_clave_debe_ser_exacta()
+    {
+        // §3.md/Fix 3: NO se normaliza una clave inválida. La validación es estricta: una clave solo es
+        // válida si YA es un nombre de archivo seguro exacto. Separar "validación" de "normalización" y
+        // rechazar claves que requieran normalizar evita romper la correspondencia DB↔store (la StoreKey
+        // persistida debe == nombre en disco).
+        var store = new FileSystemMessageStore(Path.Combine(Path.GetTempPath(),
+            "atlasmail_storekey_" + Guid.NewGuid().ToString("N")));
+
+        // Clave legítima generada por el store (GUID hex [.eml]) → válida.
+        Assert.True(store.IsValidKey(Guid.NewGuid().ToString("N")));
+        Assert.True(store.IsValidKey(Guid.NewGuid().ToString("N") + ".eml"));
+
+        // Traversal / separadores de ruta → inválidos (antes se "normalizaban" a "_").
+        Assert.False(store.IsValidKey("../../etc/passwd"));
+        Assert.False(store.IsValidKey("..\\..\\windows\\system32"));
+        Assert.False(store.IsValidKey("../../archivo"));
+        Assert.False(store.IsValidKey("a/b"));
+        Assert.False(store.IsValidKey("a\\b"));
+
+        // Componentes de ruta ".." / "." puros → inválidos.
+        Assert.False(store.IsValidKey(".."));
+        Assert.False(store.IsValidKey("."));
+        Assert.False(store.IsValidKey("a..b")); // segmento vacío entre puntos = camino/".."
+        Assert.False(store.IsValidKey("a...b"));
+
+        // Vacías / absurdamente largas → inválidas.
+        Assert.False(store.IsValidKey(""));
+        Assert.False(store.IsValidKey(new string('a', 250)));
+    }
+
     /// <summary>Store controlable para inyectar fallos: key inválida y fallo de escritura en el N-ésimo write-back.</summary>
     private sealed class CrashStore : IMessageStore
     {

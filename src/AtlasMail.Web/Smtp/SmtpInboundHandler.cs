@@ -39,10 +39,11 @@ public class SmtpInboundHandler : ISmtpMessageHandler
 
     public async Task<string> AuthenticateAsync(string username, string password, SmtpSessionContext ctx, CancellationToken ct = default)
     {
-        // §49 brute-force: bloquear IP con demasiados intentos de AUTH fallidos recientes.
+        // §49 brute-force: reservar un slot de forma ATOMICA por IP en cuanto comienza el intento
+        // (bajo el lock de la IP). N conexiones concurrentes compiten por N slots; las que superan el
+        // presupuesto se bloquean. La reserva cuenta como fallo a menos que CommitSuccess la libere.
         var ip = ctx.ClientIp;
-        bool authAllowed = _authLimiter.IsAllowed(ip);
-        if (!authAllowed)
+        if (!_authLimiter.TryBegin(ip))
         {
             _logger.LogWarning("SMTP AUTH bloqueado por rate-limit desde {Ip}", ip);
             await Task.Delay(500, ct);
@@ -79,20 +80,20 @@ public class SmtpInboundHandler : ISmtpMessageHandler
 
         if (mb == null || string.IsNullOrEmpty(mb.PasswordHash))
         {
-            _authLimiter.RecordFailure(ip);
             _logger.LogInformation("SMTP AUTH falló {User}: buzón no encontrado o sin hash", username);
             return "535 5.7.8 Authentication credentials invalid";
         }
 
         if (_hasher.Verify(password, mb.PasswordHash))
         {
+            // Crédito válido: liberar el slot reservado para no contarlo como fallo.
+            _authLimiter.CommitSuccess(ip);
             ctx.Authenticated = true;
             ctx.AuthUsername = mb.EmailAddress;
             _logger.LogInformation("SMTP AUTH OK {User}", mb.EmailAddress);
             return "235 2.7.0 Authentication successful";
         }
 
-        _authLimiter.RecordFailure(ip);
         _logger.LogInformation("SMTP AUTH falló {User}: password incorrecto", username);
         return "535 5.7.8 Authentication credentials invalid";
     }

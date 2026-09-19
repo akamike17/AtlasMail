@@ -35,6 +35,8 @@ public class AtlasMailDbContext : DbContext, IApplicationDbContext
     public Task<int> ExecuteSqlRawAsync(string sql, CancellationToken ct = default)
         => Database.ExecuteSqlRawAsync(sql, ct);
 
+    public void ClearChangeTracker() => ChangeTracker.Clear();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<MailDomain>(e =>

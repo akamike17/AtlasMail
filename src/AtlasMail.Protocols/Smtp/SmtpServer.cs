@@ -146,7 +146,14 @@ public sealed class SmtpServer : IAsyncDisposable
                     var readToken = inData && _options.DataTimeoutEnabled && dataCts != null ? dataCts.Token : token;
                     line = await reader.ReadLineAsync(readToken);
                 }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException)
+                {
+                    // §3.md/Fix 4: el read de DATA se canceló por el temporizador absoluto (dataCts).
+                    // Garantizar el contrato exacto: timeout → 421 4.4.2 → cierre (no cerrar en silencio).
+                    if (inData && _options.DataTimeoutEnabled)
+                        await writer.WriteAsync("421 4.4.2 Timeout receiving DATA, connection closing\r\n");
+                    break;
+                }
                 catch (Exception) { break; }
                 if (line == null) break; // EOF
 

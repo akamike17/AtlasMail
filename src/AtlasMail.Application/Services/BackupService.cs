@@ -122,37 +122,162 @@ public class BackupService : IBackupService
             return new RestoreResult(false, ex.Message, null, 0);
         }
 
-        // 4. Restore del store PRIMERO (escrituras atómicas por clave). Si cualquier write-back
-        //    falla a medias, la DB NO se ha restaurado aún → nunca queda publicada apuntando a un
-        //    store parcial.
+        // 4. FASE B (staging/rollback): capturar el estado ACTUAL de la DB y del store para poder
+        //    volver íntegramente al estado anterior si la publicación falla a mitad. La atomicidad
+        //    real se logra por COMPENSACIÓN: captura previa + restauración en caso de fallo.
+        //    NO basta la transacción SQL: el message store es filesystem (ajeno a la transacción),
+        //    y en MySQL `TRUNCATE`/DDL hace implicit commit (no rollbackable). Se evita esa trampa.
+        List<(string Key, byte[]? Data)> storeOriginal;
+        try { storeOriginal = await CaptureStoreStateAsync(storeData, ct); }
+        catch (Exception ex)
+        {
+            return new RestoreResult(false, "No se pudo capturar el estado actual del store (abortado sin tocar nada): " + ex.Message, null, 0);
+        }
+        List<DbSnapshotRow> dbOriginal;
+        try { dbOriginal = await CaptureSnapshotAsync(ct); }
+        catch (Exception ex)
+        {
+            return new RestoreResult(false, "No se pudo capturar el estado actual de la DB (abortado): " + ex.Message, null, 0);
+        }
+
+        // 5. Publicar store (escrituras atómicas por clave) y luego DB (transaccional con DELETE
+        //    rollbackable). Si CUALQUIER paso falla → compensar: restaurar el estado original de
+        //    AMBOS, de modo que nunca quede un estado híbrido (DB nueva + store viejo o viceversa).
         try
         {
             foreach (var (key, data) in storeData)
                 await _store.SaveWithKeyAsync(key, data, ct);
+
+            int restored = await ApplySnapshotAsync(snapshotPath, ct);
+
+            await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "OK", $"tables={restored} store={storeData.Count}", ct);
+            _logger.LogInformation("Backup {Id} restaurado ({Restored} tablas, {Store} archivos store)", backupId, restored, storeData.Count);
+            return new RestoreResult(true, null, backupId, restored);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Restore store falló antes de tocar la DB (nada publicado): backup {Id}", backupId);
-            await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "FAIL", "store write-back falló; DB intacta", ct);
-            return new RestoreResult(false, "Fallo restaurando el message store; la DB no se modificó: " + ex.Message, null, 0);
+            _logger.LogWarning(ex, "Restore falló; compensando al estado original (DB+store): backup {Id}", backupId);
+            var compensationError = await CompensateRestoreAsync(storeOriginal, dbOriginal, actor, backupId, ex.Message, ct);
+            var msg = compensationError ?? ("Restore falló y se revirtió al estado anterior: " + ex.Message);
+            return new RestoreResult(false, msg, null, 0);
         }
+    }
 
-        // 5. Restore DB snapshot (transaccional, identificación por URL del método).
-        int restored;
+    /// <summary>Captura el estado ACTUAL del store únicamente para las claves que el backup va a
+    /// sobrescribir (key → bytes previos, o null si la clave no existía). Es la base del rollback.</summary>
+    private async Task<List<(string Key, byte[]? Data)>> CaptureStoreStateAsync(
+        List<(string Key, byte[] Data)> storeData, CancellationToken ct)
+    {
+        var result = new List<(string, byte[]?)>();
+        foreach (var (key, _) in storeData)
+        {
+            byte[]? prev = null;
+            try { prev = await _store.ReadAsync(key, ct); } catch (FileNotFoundException) { /* no existía */ }
+            result.Add((key, prev));
+        }
+        return result;
+    }
+
+    /// <summary>Restaura el estado original de la DB y del store capturado en FASE B. Best-effort:
+    /// nunca lanza hacia el llamador: si la compensación falla, queda un fallo crítico auditado y un
+    /// punto de recuperación manual, y el RestoreAsync devuelve false con el motivo.</summary>
+    private async Task<string?> CompensateRestoreAsync(
+        List<(string Key, byte[]? Data)> storeOriginal, List<DbSnapshotRow> dbOriginal,
+        string actor, string backupId, string reason, CancellationToken ct)
+    {
+        // 1) Restaurar el store original (los archivos previos, o borrar los que no existían).
         try
         {
-            restored = await ApplySnapshotAsync(snapshotPath, ct);
+            foreach (var (key, prev) in storeOriginal)
+            {
+                if (prev is null) await _store.DeleteAsync(key, ct);
+                else await _store.SaveWithKeyAsync(key, prev, ct);
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Restore DB falló tras restaurar store (store extra, DB intacta): backup {Id}", backupId);
-            await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "FAIL", "snapshot DB falló; DB no modificada", ct);
-            return new RestoreResult(false, "Fallo restaurando el snapshot de la DB: " + ex.Message, null, 0);
+            _logger.LogCritical(ex, "Compensación del STORE falló para backup {Id} (estado híbrido posible). Requiere intervención manual.", backupId);
+            await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "FAIL", $"restore falló ({reason}); compensación STORE falló: {ex.Message}", ct);
+            return "Restore falló y la compensación del store no pudo completarse (estado híbrido posible, requiere intervención): " + ex.Message;
         }
 
-        await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "OK", $"tables={restored} store={storeData.Count}", ct);
-        _logger.LogInformation("Backup {Id} restaurado ({Restored} tablas, {Store} archivos store)", backupId, restored, storeData.Count);
-        return new RestoreResult(true, null, backupId, restored);
+        // 2) Restaurar la DB original (mismo mecanismo transaccional con DELETE, rollbackable).
+        //    Limpiamos el ChangeTracker: el intento de restore que falló puede haber dejado entidades
+        //    trackeadas que un SaveChanges reinsertaría por error.
+        try
+        {
+            _db.ClearChangeTracker();
+            await ApplySnapshotRowsAsync(dbOriginal, ct);
+            await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "FAIL",
+                $"restore falló ({reason}); DB y store revertidos al estado anterior", ct);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Compensación de la DB falló para backup {Id}. Requiere intervención manual.", backupId);
+            await _audit.RecordAsync("Backup.Restored", actor, null, null, "backup", backupId, "FAIL", $"restore falló ({reason}); compensación DB falló: {ex.Message}", ct);
+            return "Restore falló y la compensación de la DB no pudo completarse (requiere intervención): " + ex.Message;
+        }
+    }
+
+    private async Task<int> ApplySnapshotAsync(string snapshotPath, CancellationToken ct)
+    {
+        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(snapshotPath, ct));
+        var data = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var el in doc.RootElement.EnumerateArray())
+            data[el.GetProperty("Table").GetString()!] = el.GetProperty("Data").GetString()!;
+        return await ApplySnapshotRowsAsync(ToRows(data), ct);
+    }
+
+    private static List<DbSnapshotRow> ToRows(Dictionary<string, string> data) =>
+        data.Select(kv => new DbSnapshotRow(kv.Key, kv.Value)).ToList();
+
+    /// <summary>Aplica un set de tablas de forma transaccional. Usa DELETE (DML rollbackable con
+    /// InnoDB), NO TRUNCATE: `TRUNCATE` hace implicit commit en MySQL y no puede formar parte de un
+    /// rollback, lo que hacía falsa la atomicidad del restore. DELETE dentro de la transacción sí
+    /// se revierte con Rollback si algo falla a mitad.</summary>
+    private async Task<int> ApplySnapshotRowsAsync(List<DbSnapshotRow> rows, CancellationToken ct)
+    {
+        var data = rows.ToDictionary(r => r.Table, r => r.Data, StringComparer.Ordinal);
+
+        // Pomelo usa MySqlRetryingExecutionStrategy, que requiere envolver la transacción
+        // manual en ExecuteAsync (no soporta BeginTransactionAsync directo).
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+            // Vaciar tablas en orden inverso a las FK (evita violación de RESTRICT). DELETE es
+            // rollbackable; en fallo, el Rollback devuelve la DB al estado anterior.
+            await _db.ExecuteSqlRawAsync("SET FOREIGN_KEY_CHECKS=0");
+            foreach (var table in new[] { "DeliveryAttempts", "AuditEvents", "LoginAttempts", "Contacts",
+                "ConfigurationEntries", "DeliveryQueue", "Attachments", "MessageRecipients", "Messages",
+                "Folders", "Aliases", "Mailboxes", "Users", "Domains" })
+            {
+                await _db.ExecuteSqlRawAsync($"DELETE FROM `{table}`");
+            }
+            await _db.ExecuteSqlRawAsync("SET FOREIGN_KEY_CHECKS=1");
+
+            // Restaurar en orden de dependencia (padres primero).
+            RestoreTable(_db.Domains, data, "Domains");
+            RestoreTable(_db.Users, data, "Users");
+            RestoreTable(_db.Mailboxes, data, "Mailboxes");
+            RestoreTable(_db.Aliases, data, "Aliases");
+            RestoreTable(_db.Folders, data, "Folders");
+            RestoreTable(_db.Messages, data, "Messages");
+            RestoreTable(_db.MessageRecipients, data, "MessageRecipients");
+            RestoreTable(_db.Attachments, data, "Attachments");
+            RestoreTable(_db.DeliveryQueue, data, "DeliveryQueue");
+            RestoreTable(_db.DeliveryAttempts, data, "DeliveryAttempts");
+            RestoreTable(_db.Contacts, data, "Contacts");
+            RestoreTable(_db.ConfigurationEntries, data, "ConfigurationEntries");
+            RestoreTable(_db.LoginAttempts, data, "LoginAttempts");
+            RestoreTable(_db.AuditEvents, data, "AuditEvents");
+
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return data.Count;
+        });
     }
 
     /// <summary>Carga y valida todo el message store referenciado por el manifest: cada archivo
@@ -212,53 +337,6 @@ public class BackupService : IBackupService
         snap.Add(new DbSnapshotRow("Contacts", ToJson(await _db.Contacts.AsNoTracking().ToListAsync(ct))));
         snap.Add(new DbSnapshotRow("ConfigurationEntries", ToJson(await _db.ConfigurationEntries.AsNoTracking().ToListAsync(ct))));
         return snap;
-    }
-
-    private async Task<int> ApplySnapshotAsync(string snapshotPath, CancellationToken ct)
-    {
-        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(snapshotPath, ct));
-        var data = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var el in doc.RootElement.EnumerateArray())
-            data[el.GetProperty("Table").GetString()!] = el.GetProperty("Data").GetString()!;
-
-        // Pomelo usa MySqlRetryingExecutionStrategy, que requiere envolver la transacción
-        // manual en ExecuteAsync (no soporta BeginTransactionAsync directo).
-        var strategy = _db.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(async () =>
-        {
-            await using var tx = await _db.Database.BeginTransactionAsync(ct);
-
-            // Vaciar tablas en orden inverso a las FK (evita violación de RESTRICT).
-            // Deshabilitar temporalmente la verificación de FK solo dentro de esta transacción.
-            await _db.ExecuteSqlRawAsync("SET FOREIGN_KEY_CHECKS=0");
-            foreach (var table in new[] { "DeliveryAttempts", "AuditEvents", "LoginAttempts", "Contacts",
-                "ConfigurationEntries", "DeliveryQueue", "Attachments", "MessageRecipients", "Messages",
-                "Folders", "Aliases", "Mailboxes", "Users", "Domains" })
-            {
-                await _db.ExecuteSqlRawAsync($"TRUNCATE TABLE `{table}`");
-            }
-            await _db.ExecuteSqlRawAsync("SET FOREIGN_KEY_CHECKS=1");
-
-            // Restaurar en orden de dependencia (padres primero).
-            RestoreTable(_db.Domains, data, "Domains");
-            RestoreTable(_db.Users, data, "Users");
-            RestoreTable(_db.Mailboxes, data, "Mailboxes");
-            RestoreTable(_db.Aliases, data, "Aliases");
-            RestoreTable(_db.Folders, data, "Folders");
-            RestoreTable(_db.Messages, data, "Messages");
-            RestoreTable(_db.MessageRecipients, data, "MessageRecipients");
-            RestoreTable(_db.Attachments, data, "Attachments");
-            RestoreTable(_db.DeliveryQueue, data, "DeliveryQueue");
-            RestoreTable(_db.DeliveryAttempts, data, "DeliveryAttempts");
-            RestoreTable(_db.Contacts, data, "Contacts");
-            RestoreTable(_db.ConfigurationEntries, data, "ConfigurationEntries");
-            RestoreTable(_db.LoginAttempts, data, "LoginAttempts");
-            RestoreTable(_db.AuditEvents, data, "AuditEvents");
-
-            await _db.SaveChangesAsync(ct);
-            await tx.CommitAsync(ct);
-            return data.Count;
-        });
     }
 
     private static void RestoreTable<T>(DbSet<T> set, Dictionary<string, string> data, string table) where T : class

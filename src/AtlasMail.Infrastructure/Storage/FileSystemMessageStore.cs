@@ -24,17 +24,57 @@ public sealed class FileSystemMessageStore : IMessageStore
 
     private string Resolve(string key)
     {
-        var safe = Regex.Replace(key, @"[^a-zA-Z0-9._-]", "_");
-        // Evita path traversal
-        var path = Path.GetFullPath(Path.Combine(_root, safe));
+        // §3.md/Fix 3: NO se normaliza silenciosamente una clave inválida. La validación es ESTRICTA:
+        // la clave debe ser exactamente válida (solo [A-Za-z0-9._-], sin separadores de ruta, sin ".."
+        // como componente). Si una clave requiere normalización para ser "segura", se rechaza — de otro
+        // modo la clave persistida no coincidiría con la StoreKey que referencia la DB (rompe el restore
+        // y permite colisiones de caminos normalizados a la misma ruta).
+        if (!IsValidKey(key))
+            throw new InvalidOperationException("Clave de almacenamiento inválida: " + key);
+
+        var path = Path.GetFullPath(Path.Combine(_root, key));
         if (!path.StartsWith(_root, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Clave de almacenamiento inválida");
         return path;
     }
 
+    /// <summary>
+    /// ¿Es esta clave EXACTAMENTE válida como nombre de archivo dentro del store? Rechaza:
+    ///  - claves vacías, "." , ".." o con ".." como componente (traversal),
+    ///  - caracteres fuera de [A-Za-z0-9._-] (en especial separadores de ruta / y \ , y \0),
+    ///  - claves cuya ruta resuelta escapa del directorio raíz.
+    /// A diferencia de una validación que "acepta si se puede normalizar", esta rechaza toda clave que
+    /// no sea ya un nombre seguro — garantizando que la StoreKey persistida == nombre en disco.
+    /// </summary>
     public bool IsValidKey(string storeKey)
     {
-        try { Resolve(storeKey); return true; }
+        if (string.IsNullOrEmpty(storeKey))
+            return false;
+        if (storeKey.Length > 200)
+            return false; // acotar nombres absurdos
+
+        // Cada carácter debe estar permitido, y no permitir componentes de ruta ".."/".".
+        if (storeKey is "." or "..")
+            return false;
+
+        foreach (var c in storeKey)
+            if (!(char.IsAsciiLetterOrDigit(c) || c == '.' || c == '_' || c == '-'))
+                return false;
+
+        // Rechazar ".." como componente de ruta (traversal). Al ser separatodos por '.', cualquier
+        // clave con un segmento vacío entre dos puntos (".","..","a..b") denota un componente ".." o
+        // un camino, no un nombre de archivo plano; en todos los casos es rechazado por no ser un
+        // identificador plano inequívoco (los store keys reales son GUID.algo, sin '..').
+        var parts = storeKey.Split('.');
+        if (parts.Any(p => p.Length == 0))
+            return false;
+
+        // Verificación de raíz (traversal residual): Path.GetFullPath debe quedar dentro de _root.
+        try
+        {
+            var path = Path.GetFullPath(Path.Combine(_root, storeKey));
+            return path.StartsWith(_root, StringComparison.OrdinalIgnoreCase);
+        }
         catch { return false; }
     }
 

@@ -7,66 +7,61 @@ Fecha FASE 9: 2026-09-18. Entorno: Windows, MySQL 8.0.46 local, .NET 8.0.425.
 | Requisito (spec §48/§49) | Resultado | Evidencia |
 |---|---|---|
 | `dotnet build -c Release` → 0 errores | ✅ | `0 Advertencia(s) / 0 Errores` |
-| `dotnet test -c Release` → ALL PASS | ✅ | Unit **149/149** + Integration **25/25** = **174/174** |
+| `dotnet test -c Release` → ALL PASS | ✅ | Unit **153/153** + Integration **26/26** = **179/179** |
 | **huge DATA** (fix A) | ✅ | > `MaxMessageBytes` → **552** + descarte (no MIME truncado) |
 | **SMTP flood** (fix C) | ✅ | > `MaxCommandsPerConnection` → **421** + cierre |
-| **brute-force SMTP AUTH** (fix B) | ✅ | `AuthRateLimiter` por IP, sin lock global, expiración+eliminación |
+| **brute-force SMTP AUTH** (fix B) | ✅ | `AuthRateLimiter` por IP atómico (`TryBegin`/`CommitSuccess`) + `SweepExpired` global |
 | open relay | ✅ | RelayPolicy deniega exteriores anónimos (E2E) |
-| path traversal store | ✅ | `Resolve` normaliza + rechaza escapes raíz; `IsValidKey` |
+| path traversal store | ✅ | `IsValidKey` ESTRICTO (rechaza claves que requieran normalizarse) |
 | zip bomb / antimalware | ✅ | no-descompresión + límite tamaño + scanner heurístico |
-| **§48 restore del store** | ✅ | `RestoreAsync` valida primero (FASE A read-only), luego write-back por clave |
+| **§48 restore del store** | ✅ | `RestoreAsync` FASE A read-only (hash+clave), luego publicación con compensación DB+store |
 | Smoke §48 (destruir storage) | ✅ | correo → backup → storage destruido → restore → store repoblado (PASS) |
 
-### Ejecuciones reales FASE 9 (+ remediación 2.md)
+### Ejecuciones reales FASE 9 (+ remediación 2.md + cierre quirúrgico 3.md)
 ```
 Compilación correcta.  0 Advertencia(s)  0 Errores
-AtlasMail.UnitTests.dll:          Correctas!  149/149 (0 error)  964 ms
-AtlasMail.IntegrationTests.dll:   Correctas!  25/25  (0 error)  28 s
+AtlasMail.UnitTests.dll:          Correctas!  153/153 (0 error)  970 ms
+AtlasMail.IntegrationTests.dll:   Correctas!  26/26  (0 error)  29 s
 ```
-Tests relevantes (nuevos, de la remediación 2.md):
-- Unit: `SecurityHardeningTests` (AuthRateLimiter: N fallos→bloqueo→expiración; IP A≠B;
-  concurrencia multi-IP acota memoria; HtmlSanitizer: script/eventos/urls/iframe/style;
-  IMAP RequireTlsForLogin). `BackupRestoreTests` (restore atómico, clave original
-  preservada, MIME byte-a-byte, hash corrupto no modifica, storeKey inválido no modifica,
-  fallo write-back no publica parcial, volver a leer tras restore).
-- Integration: `DATA_infinito_sin_punto_se_cierra_por_timeout` (1s de DataTimeout),
-  `STARTTLS_impide_AUTH_en_claro_y_permite_TLS`, `STARTTLS_sin_certificado_da_454`,
-  `Oversize_DATA_rechazado_552_sin_entregar_truncado`, `Flood_de_comandos_cerrado_con_421`,
-  `Restore_*` (+5 casos atómicos).
 
-### Honestidad (§44)
+### Honestidad (§44) — al cierre quirúrgico (3.md)
+- **Restore REALMENTE atómico (3.md Fix 1):** se eliminó `TRUNCATE TABLE` (implicit commit en MySQL,
+  NO rollbackable) dentro de la "transacción": ahora `ApplySnapshotRowsAsync` usa `DELETE` (DML
+  rollbackable con InnoDB). Además, `RestoreAsync` captura el estado actual de DB y store (FASE B) y,
+  si CUALQUIER paso falla tras publicar el store, ejecuta `CompensateRestoreAsync` que revierte la DB
+  y el store a su estado original (ChangeTracker limpiado vía `ClearChangeTracker` en la interfaz).
+  **Probado con E2E de inyección de fallo contra MySQL REAL** (`RestoreFailureInjectionTests`):
+  store publicado + fallo inyectado durante el apply DB → el restore devuelve false y la DB (dominio
+  actual) y el store (MIME previo) quedan INTACTOS. Esta es la propiedad que una transacción SQL sola
+  no podía garantizar (filesystem ≠ transacción).
+- **AuthRateLimiter atómico (3.md Fix 2):** el camino real de SMTP usa `AuthRateLimiter.TryBegin(ip)`
+  (reserva de slot ATOMICA por IP bajo su lock) + `CommitSuccess(ip)` (libera el slot si la credencial
+  es válida). N conexiones concurrentes compiten por N slots; las que superan el presupuesto se
+  bloquean de inmediato (sin la debilidad IsAllowed-then-RecordFailure). `SweepExpired()` (barrido
+  global periódico via timer) elimina entradas de IPs abandonadas tras la ventana, sin depender de que
+  la IP sea re-tocada. Pruebas: N reservas→bloqueo, éxito libera, stress concurrente (64 intentos→4
+  slots), SweepExpired limpia IPs inactivas.
+- **StoreKey estricto (3.md Fix 3):** `FileSystemMessageStore.IsValidKey` YA NO normaliza una clave
+  inválida a un nombre "seguro". Exige que la clave sea exactamente válida (solo `[A-Za-z0-9._-]`, sin
+  separadores de ruta, sin componentes `.`/`..`) garantizando StoreKey persistida == nombre en disco.
+  `Resolve` lanza si `!IsValidKey`, en vez de reescribir. Prueba: `IsValidKey_es_estricto_la_clave_debe_ser_exacta`.
+- **DATA timeout → 421 exacto (3.md Fix 4):** el `OperationCanceledException` del read con
+  `DataTimeout` ahora emite `421 4.4.2 Timeout receiving DATA, connection closing` antes de cerrar.
+  El E2E `DATA_infinito_sin_punto_se_cierra_por_timeout` exige verificar el `421 4.4.2 ...` (no solo EOF).
 - Los fixes A/B/C se verificaron E2E contra SMTP real (socket) sobre MySQL real.
-- §48: la prueba destruyó el storage y confirmó el write-back; la reconstrucción desde cero
-  en una máquina distinta queda como arranque fresco documentado.
-- **Restore atómico (2.md #1/#5):** `RestoreAsync` ahora hace FASE A read-only (valida hash y
-  clave de TODO el store sin escribir) y sólo entonces restaura el store por clave + el
-  snapshot DB. Si un MIME/hash/storeKey falla: nada se publica. Si el write-back falla: la
-  DB no se ha tocado. Cubierto por 5 tests automáticos.
-- **Escribas atómicas del store (2.md #2):** `SaveWithKeyAsync` valida siempre la clave vía
-  `Resolve` (lanza en traversal) y escribe a temporal + flush + rename atómico en el mismo
-  filesystem. Un MIME truncado nunca queda como archivo "válido" de la clave.
-- **Brute-force AUTH (2.md #3):** `AuthRateLimiter` (nuevo) reemplaza el lock global con estado
-  thread-safe por IP, expira y ELIMINA entradas antiguas, ventana/límite configurables
-  (`Smtp:AuthFailuresPerIpMax`/`AuthFailureWindowMinutes`). Pruebas: N fallos→bloqueo→expiración
-  →se vuelve a permitir; IP A no bloquea IP B; concurrencia multi-IP acota memoria.
-- **DATA infinito (2.md #4):** se añadió `DataTimeout` absoluto con CTS por DATA vinculado a la
-  sesión. Cubre tanto un stream continuo (sigue enviando líneas sin ".") como un cliente
-  inactivo: `ReadLineAsync` se cancela por tiempo y el servidor cierra la sesión con 421. Sin
-  crecimiento de memoria (buffer ya acotado por `MaxMessageBytes`). Test E2E completo.
-- **TLS/STARTTLS (2.md #7):** servidores SMTP e IMAP soportan STARTTLS con certificado
-  (config `Smtp/Imap:TlsCertificatePath`). Con `RequireTls=1` se rechaza AUTH/LOGIN en claro
-  (530) y no se anuncia AUTH antes de negociar TLS. Sanitización segura del HTML de correos
-  (`HtmlSanitizer`) + render en `<iframe sandbox>` (XSS hostil probado en unit).
-- **MFA/TOTP:** NO implementado — el repo original no lo especificaba como requisito local
-  completo y probable, por lo que se mantiene explícitamente PENDIENTE (no se afirma completitud).
-- **Cuelgue de la suite de integración (fix de entorno/prueba):** el `DeliveryWorker` era
-  registrado incondicionalmente; al dropear la BD temporal de un test el worker entraba en
-  spin infinito ("Unknown database ≈99680 veces"), agotaba el pool MySQL e impedía el cierre
-  del testhost. Se añadió `Delivery:WorkerEnabled` (default 1; los tests lo apagan). La entrega
-  local E2E es síncrona, no lo necesita. Además: el test `STARTTLS_impide...` no enviaba el
-  EHLO previo → deadlock del testhost (corregido); el cierre TCP del SMTP ahora usa Shutdown
-  limpio (FIN, no RST) para que el 421 llegue siempre; el test `Flood` aísla el límite de
-  conexiones (contador por IP estático compartido entre servers del proceso).
+- §48: la prueba destruyó el storage y confirmó el write-back; la reconstrucción desde cero en una
+  máquina distinta queda como arranque fresco documentado (no PROVEN sin prueba real).
+- **Escribas atómicas del store:** `SaveWithKeyAsync` valida la clave vía `Resolve` (lanza si no exac.)
+  y escribe a temporal + flush + rename atómico en el mismo filesystem.
+- **TLS/STARTTLS:** servidores SMTP e IMAP soportan STARTTLS; `RequireTls` rechaza AUTH/LOGIN en
+  claro (530/NO) y no anuncia AUTH antes del TLS. `HtmlSanitizer` + `<iframe sandbox>` (XSS hostil probado).
+- **MFA/TOTP:** PENDIENTE explícito (no era requisito local completo y probable; no se afirma completitud).
+- **Cuelgue de la suite de integración (entorno/prueba):** `DeliveryWorker` desactivable
+  (`Delivery:WorkerEnabled`, 0 en tests) — la entrega local E2E es síncrona. Cierre TCP SMTP con
+  Shutdown limpio (FIN, no RST) para que el 421 llegue siempre; test `Flood` aísla el límite de
+  conexiones (contador por IP estático compartido); test `STARTTLS` con el EHLO previo.
+- **CI GitHub:** los números 179/179 son evidencia LOCAL documentada (no CI GitHub: no hay workflows
+  asociados al commit).
 
 ## FASE 8 (avanzada) — Backend de IA — Definition of Done
 

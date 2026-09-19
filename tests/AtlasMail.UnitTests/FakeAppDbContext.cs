@@ -41,6 +41,7 @@ public class FakeAppDbContext : DbContext, IApplicationDbContext
     public DbSet<DistributionListMember> DistributionListMembers { get; set; } = null!;
 
     public Task<int> ExecuteSqlRawAsync(string sql, CancellationToken ct = default) => Task.FromResult(0);
+    public void ClearChangeTracker() => ChangeTracker.Clear();
 
     protected override void OnModelCreating(ModelBuilder mb)
     {

@@ -54,7 +54,7 @@ export Smtp__MaxMessageBytes=52428800          # límite de mensaje (MIME crudo)
 export Smtp__MaxCommandsPerConnection=1000     # flood de comandos → 421
 export Smtp__AuthFailuresPerIpMax=10           # brute-force AUTH por IP
 export Smtp__AuthFailureWindowMinutes=15       # ventana del contador anti-brute-force
-export Smtp__DataTimeout=600                   # segundos; límite absoluto de la fase DATA (stream infinito)
+export Smtp__DataTimeoutSeconds=600             # segundos; límite absoluto de la fase DATA (stream infinito)
 export Smtp__TlsCertificatePath='/etc/ssl/mail.pfx'   # opcional; habilita STARTTLS
 export Smtp__TlsCertificatePassword=''         # password del PFX (vacío si no tiene)
 export Smtp__RequireTls=1                      # 1 = exige TLS antes de AUTH (rechaza 530 en claro)

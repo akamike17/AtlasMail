@@ -75,6 +75,64 @@ public class AuthRateLimiterTests
         // Cada una de las 50 IPs recibió 200/50 × 3 fallos = 12 (window compartida por IP).
         Assert.Equal(12, rl.Count("p0"));
     }
+
+    [Fact]
+    public void TryBegin_es_atomico_por_IP_y_el_exito_libera()
+    {
+        // §3.md/Fix 2: la reserva de slot es atómica por IP. N conexiones simultáneas compiten por N
+        // slots; una vez consumidos, TryBegin devuelve false SIEMPRE hasta CommitSuccess o expiración.
+        var rl = new AuthRateLimiter(maxFailures: 3, window: TimeSpan.FromMinutes(1));
+        // 3 reservas simultáneas válidas, la 4ª debe estar bloqueada de inmediato (sin esperar a registrar
+        // el fallo después del hash, que era la debilidad del patrón IsAllowed-then-RecordFailure).
+        Assert.True(rl.TryBegin("ip-z"));
+        Assert.True(rl.TryBegin("ip-z"));
+        Assert.True(rl.TryBegin("ip-z"));
+        Assert.False(rl.TryBegin("ip-z"), "tras 3 reservas, una 4ª conexión concurrente debe bloquearse");
+        Assert.Equal(3, rl.Count("ip-z"));
+
+        // Una credencial válida libera el slot (CommitSuccess) → vuelve a permitir.
+        rl.CommitSuccess("ip-z");
+        Assert.True(rl.TryBegin("ip-z"), "CommitSuccess libera un slot → siguiente intento permitido");
+        Assert.Equal(3, rl.Count("ip-z"));
+    }
+
+    [Fact]
+    public void TryBegin_concurrencia_estricta_respeta_el_limite()
+    {
+        // §3.md/Fix 2: bajo contención real, a lo sumo MaxFailures reservas concurrentes tienen éxito.
+        const int attempts = 64;
+        var rl = new AuthRateLimiter(maxFailures: 4, window: TimeSpan.FromMinutes(1));
+        var ok = 0; var blocked = 0; var errs = new ConcurrentQueue<Exception>();
+        Parallel.For(0, attempts, _ =>
+        {
+            try
+            {
+                var allow = rl.TryBegin("ip-race");
+                if (allow) System.Threading.Interlocked.Increment(ref ok);
+                else System.Threading.Interlocked.Increment(ref blocked);
+            }
+            catch (Exception ex) { errs.Enqueue(ex); }
+        });
+        Assert.Empty(errs);
+        Assert.Equal(4, ok);        // exactamente 4 slots concedidos (límite)
+        Assert.Equal(attempts - 4, blocked); // el resto bloqueado, sin que ninguna "se cuele"
+        Assert.Equal(4, rl.Count("ip-race"));
+    }
+
+    [Fact]
+    public void SweepExpired_elimina_IPs_abandonadas_globalmente()
+    {
+        // §3.md/Fix 2: la limpieza NO debe depender de que la IP sea re-tocada. El barrido global debe
+        // eliminar las entradas de IPs inactivas tras la ventana.
+        var rl = new AuthRateLimiter(maxFailures: 5, window: TimeSpan.FromMilliseconds(120), sweepInterval: null);
+        rl.RecordFailure("ip-1");
+        rl.RecordFailure("ip-2");
+        Assert.Equal(2, rl.IpCount);
+
+        Thread.Sleep(200); // la ventana expira y no se vuelve a tocar ninguna IP
+        rl.SweepExpired();
+        Assert.True(rl.IpCount == 0, "IPs abandonadas tras la ventana deben eliminarse por el barrido global");
+    }
 }
 
 /// <summary>

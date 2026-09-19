@@ -36,4 +36,7 @@ public interface IApplicationDbContext
     Task<int> SaveChangesAsync(CancellationToken ct = default);
     /// <summary>Ejecuta SQL raw (usado por backup/restore). Implementado en Infrastructure.</summary>
     Task<int> ExecuteSqlRawAsync(string sql, CancellationToken ct = default);
+    /// <summary>Limpia el ChangeTracker del contexto (uso en compensaciones de restore: descarta cualquier
+    /// entidad que un intento de apply fallido haya dejado trackeada para que un SaveChanges no la re-inserte).</summary>
+    void ClearChangeTracker();
 }

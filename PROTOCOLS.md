@@ -56,9 +56,10 @@ Servidor SMTP real (`AtlasMail.Protocols.Smtp.SmtpServer`), state machine multih
 ## Límites de sesión SMTP (FASE 9)
 - `MaxMessageBytes` (default 50 MB): al exceder, DATA se descarta con `552 5.3.4` (nunca se entrega un MIME truncado).
 - `MaxCommandsPerConnection` (default 1000): flood de comandos → `421 4.7.0 Too many commands` y cierre.
-- `DataTimeout` (default 10 min, activable): límite ABSOLUTO de la fase DATA vía cancellation-token vinculado a la
-  sesión. Cubre tanto un stream infinito (sigue enviando sin `.`) como un cliente inactivo; al vencer, `421 4.4.2`
-  y cierre seguro de la sesión sin crecimiento de memoria.
+- `DataTimeout` (config `Smtp:DataTimeoutSeconds`, default 600): límite ABSOLUTO de la fase DATA vía
+  cancellation-token vinculado a la sesión. Cubre tanto un stream infinito (sigue enviando sin `.`) como un
+  cliente inactivo; al vencer, `421 4.4.2 Timeout receiving DATA, connection closing` y cierre seguro de la
+  sesión sin crecimiento de memoria.
 - `MaxConnectionsPerIp` (default 20): exceso → `421 Too many connections`.
 
 ## Cliente SMTP (outbound) — `SmtpClient` (FASE 2 operativo)
